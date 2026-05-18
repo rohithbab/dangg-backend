@@ -231,6 +231,112 @@ Any future expiry, any 3-digit CVV. UPI test handle: `success@razorpay`.
 
 The webhook is the **source of truth**. `payments-verify` is a UX optimization that credits coins immediately while the app is foregrounded; if it loses the race against the webhook, the second `UPDATE … WHERE status = 'initiated'` matches zero rows and the function returns the already-credited result.
 
+## Chat request flow
+
+A male sends a chat request to an online verified female. Coins are escrowed (debited immediately) and refunded on every non-accept outcome. A pg_cron job sweeps stale pending rows once a minute.
+
+### State machine
+
+```
+              ┌──────────┐ accept   → accepted   (credit female earnings)
+   send ───► │ pending  │ decline  → declined   (refund male)
+              └──────────┘ cancel   → cancelled  (refund male)
+                    │
+                    └ expires_at  → expired    (refund male, via pg_cron)
+```
+
+All four terminal states are final — no further transitions.
+
+### Coin / earnings movements
+
+| Transition | Male wallet | Female earnings |
+|---|---|---|
+| send → pending | `-chat_cost_coins` (`chat_charge`) | — |
+| pending → accepted | — | `+chat_cost_coins` (`chat_earning`) |
+| pending → declined | `+chat_cost_coins` (`chat_refund`) | — |
+| pending → cancelled | `+chat_cost_coins` (`chat_refund`) | — |
+| pending → expired | `+chat_cost_coins` (`chat_refund`) | — |
+
+The cost is snapshotted at send time. If the female updates her `coin_price` after the request is sent, the request still honours the original price.
+
+### Timeouts & cron
+
+- Pending requests carry `expires_at = sent_at + 120s` (set by `chat-requests-send`).
+- `public.expire_pending_chat_requests()` runs every minute via pg_cron, locking candidates with `FOR UPDATE SKIP LOCKED` so it coexists with user-initiated transitions.
+- Worst-case latency from miss → "expired" UI: 120s + up to 60s cron = ~3 min.
+
+### Concurrency rules
+
+- **One pending per male.** Enforced by `chat_requests_one_pending_per_male_idx` (partial UNIQUE where `status = 'pending'`). The send Edge Function pre-checks for a friendly 409; the index is the hard guarantee.
+- **Optimistic transitions.** Every terminal UPDATE carries `eq.status = 'pending'`. If the row was already transitioned by another path (cron / cancel / decline), the UPDATE matches zero rows and the Edge Function reverses any ledger movement it just made.
+- **Locking.** `credit_coins` and `credit_female_earnings` use `FOR UPDATE` on the male / female row, so any two coin movements for the same user serialise rather than race.
+
+### Edge Function inventory
+
+| Endpoint | Auth | Body | Success response |
+|---|---|---|---|
+| `POST /functions/v1/chat-requests-send` | JWT (male) | `{ femaleId }` | `{ chatRequestId, expiresAt, coinsCharged, newCoinBalance, chargeTransactionId }` |
+| `POST /functions/v1/chat-requests-respond` | JWT (female) | `{ chatRequestId, action: 'accept'\|'decline' }` | accept → `{ status:'accepted', earningId, newEarningsBalanceCoins }`<br>decline → `{ status:'declined', refundTransactionId }` |
+| `POST /functions/v1/chat-requests-cancel` | JWT (male) | `{ chatRequestId }` | `{ status:'cancelled', refundTransactionId, newCoinBalance }` |
+
+### Mobile integration
+
+**Male — send and watch the result.**
+
+```typescript
+const { data } = await supabase.functions.invoke('chat-requests-send', {
+  body: { femaleId },
+});
+// data: { chatRequestId, expiresAt, coinsCharged, newCoinBalance }
+
+const channel = supabase
+  .channel(`chat-request-${data.chatRequestId}`)
+  .on('postgres_changes', {
+    event: 'UPDATE',
+    schema: 'public',
+    table: 'chat_requests',
+    filter: `id=eq.${data.chatRequestId}`,
+  }, ({ new: row }) => {
+    // row.status is 'accepted' | 'declined' | 'cancelled' | 'expired'
+  })
+  .subscribe();
+
+// Cancel before she responds
+await supabase.functions.invoke('chat-requests-cancel', {
+  body: { chatRequestId: data.chatRequestId },
+});
+```
+
+**Female — listen for incoming, then respond.**
+
+```typescript
+const channel = supabase
+  .channel('incoming-chat-requests')
+  .on('postgres_changes', {
+    event: 'INSERT',
+    schema: 'public',
+    table: 'chat_requests',
+    filter: `female_id=eq.${myUserId}`,
+  }, ({ new: row }) => {
+    showIncomingRequestModal(row);
+  })
+  .subscribe();
+
+await supabase.functions.invoke('chat-requests-respond', {
+  body: { chatRequestId, action: 'accept' }, // or 'decline'
+});
+```
+
+**Earnings query (female dashboard).**
+
+```typescript
+const { data } = await supabase
+  .from('female_earnings')
+  .select('id, type, amount_coins, balance_after_coins, reference_id, description, created_at')
+  .order('created_at', { ascending: false })
+  .limit(50);
+```
+
 ## Common Query Patterns
 
 Most browse + favorites flows are direct PostgREST calls — RLS enforces access, no Edge Function needed. The mobile app does this directly via the Supabase SDK.

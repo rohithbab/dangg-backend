@@ -176,3 +176,13 @@ verify_jwt = true
 [functions.webhooks-razorpay]
 # Auth is via Razorpay's HMAC signature in the X-Razorpay-Signature header.
 verify_jwt = false
+
+# --- Chat requests ----------------------------------------------------------
+[functions.chat-requests-send]
+verify_jwt = true
+
+[functions.chat-requests-respond]
+verify_jwt = true
+
+[functions.chat-requests-cancel]
+verify_jwt = true

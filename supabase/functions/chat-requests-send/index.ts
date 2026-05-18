@@ -1,0 +1,269 @@
+/**
+ * POST /functions/v1/chat-requests-send
+ *
+ * Male sends a chat request to a female. Coins are escrowed (debited
+ * immediately) and refunded automatically on decline / cancel / expire.
+ *
+ * Flow:
+ *   1. Auth — caller must be male.
+ *   2. Validate input — femaleId is a UUID, not self.
+ *   3. Load target — must be a verified, active, online, non-suspended female.
+ *   4. Confirm male has no existing pending request (friendly error;
+ *      the partial-unique index is the hard guard).
+ *   5. INSERT chat_requests row first — wins the race for the unique
+ *      slot before we touch the coin balance.
+ *   6. Debit coins via credit_coins('chat_charge'). On failure delete
+ *      the row so the male's slot frees up.
+ *   7. Patch chat_requests.charge_transaction_id with the ledger id.
+ *
+ * Auth:    JWT (male)
+ * Body:    { femaleId: uuid }
+ * Returns: { chatRequestId, expiresAt, coinsCharged, newCoinBalance,
+ *            chargeTransactionId }
+ */
+import { requireAuth, requireRole } from '../_shared/auth.ts';
+import { handlePreflight } from '../_shared/cors.ts';
+import {
+  ConflictError,
+  ForbiddenError,
+  InternalError,
+  NotFoundError,
+  PaymentRequiredError,
+  ValidationError,
+} from '../_shared/errors.ts';
+import { logger } from '../_shared/logger.ts';
+import { handler, ok } from '../_shared/responses.ts';
+import { serviceClient } from '../_shared/supabase-client.ts';
+import { parseBody, z } from '../_shared/validation.ts';
+
+const TIMEOUT_SECONDS = 120;
+
+const Body = z.object({
+  femaleId: z.string().uuid(),
+});
+
+Deno.serve(
+  handler(async (req: Request): Promise<Response> => {
+    const preflight = handlePreflight(req);
+    if (preflight) {
+      return preflight;
+    }
+    if (req.method !== 'POST') {
+      throw new ValidationError('Only POST is accepted');
+    }
+
+    // 1. Auth.
+    const user = await requireAuth(req);
+    requireRole(user, 'male');
+
+    // 2. Input.
+    const { femaleId } = await parseBody(req, Body);
+    if (femaleId === user.id) {
+      throw new ValidationError('Cannot send a chat request to yourself');
+    }
+
+    const svc = serviceClient();
+
+    // 3. Load the target. Service client so the female's coin_price is
+    //    readable even though males don't have a direct RLS path to
+    //    `females` rows for non-browseable females.
+    const { data: target, error: targetErr } = await svc
+      .from('users')
+      .select(`
+        id,
+        role,
+        is_active,
+        is_suspended,
+        females!inner (
+          verification_status,
+          is_online,
+          coin_price
+        )
+      `)
+      .eq('id', femaleId)
+      .maybeSingle();
+
+    if (targetErr) {
+      logger.error('chat-requests-send: failed to load target', {
+        femaleId,
+        error: targetErr.message,
+      });
+      throw new InternalError('Could not look up target user');
+    }
+    if (!target) {
+      throw new NotFoundError('Female user not found');
+    }
+    if (target.role !== 'female') {
+      throw new ValidationError('Target user is not a female');
+    }
+    if (!target.is_active || target.is_suspended) {
+      throw new ForbiddenError('Female user is not available');
+    }
+
+    // The !inner join guarantees `females` row exists; the JS client returns
+    // an object (not array) for !inner joins on a 1:1 relationship.
+    const femaleRow = target.females as unknown as {
+      verification_status: string;
+      is_online: boolean;
+      coin_price: number;
+    };
+
+    if (femaleRow.verification_status !== 'verified') {
+      throw new ForbiddenError('Female user is not verified');
+    }
+    if (!femaleRow.is_online) {
+      throw new ConflictError('Female user is offline. Try someone who is online.');
+    }
+    const chatCost = femaleRow.coin_price;
+    if (!Number.isInteger(chatCost) || chatCost <= 0) {
+      logger.error('chat-requests-send: invalid coin_price', { femaleId, chatCost });
+      throw new InternalError('Invalid chat cost configuration');
+    }
+
+    // 4. Friendly pre-check — the partial unique index is the hard guard,
+    //    but this lets us return a meaningful 409 instead of a Postgres
+    //    constraint message.
+    const { data: existingPending, error: pendingErr } = await svc
+      .from('chat_requests')
+      .select('id, expires_at')
+      .eq('male_id', user.id)
+      .eq('status', 'pending')
+      .maybeSingle();
+
+    if (pendingErr) {
+      logger.error('chat-requests-send: pending lookup failed', {
+        maleId: user.id,
+        error: pendingErr.message,
+      });
+      throw new InternalError('Could not check pending requests');
+    }
+    if (existingPending) {
+      throw new ConflictError(
+        'You already have a pending chat request. Wait for it to resolve before sending another.',
+      );
+    }
+
+    // 5. Coin-balance pre-check. credit_coins() is the authoritative gate
+    //    (overdraft → check_violation), but a friendly 402 beats a generic
+    //    500 when the caller is just broke.
+    const { data: maleRow, error: maleErr } = await svc
+      .from('males')
+      .select('coin_balance')
+      .eq('id', user.id)
+      .maybeSingle();
+
+    if (maleErr || !maleRow) {
+      logger.error('chat-requests-send: male row lookup failed', {
+        maleId: user.id,
+        error: maleErr?.message,
+      });
+      throw new InternalError('Could not load wallet');
+    }
+    if (maleRow.coin_balance < chatCost) {
+      throw new PaymentRequiredError(
+        `Insufficient coins. You have ${maleRow.coin_balance}; need ${chatCost}.`,
+      );
+    }
+
+    // 6. INSERT chat_request first — this reserves the male's
+    //    "one pending" slot via the partial unique index before we touch
+    //    coins. If a concurrent send races to here, exactly one wins.
+    const sentAt = new Date();
+    const expiresAt = new Date(sentAt.getTime() + TIMEOUT_SECONDS * 1000);
+
+    const { data: inserted, error: insertErr } = await svc
+      .from('chat_requests')
+      .insert({
+        male_id: user.id,
+        female_id: femaleId,
+        chat_cost_coins: chatCost,
+        status: 'pending',
+        sent_at: sentAt.toISOString(),
+        expires_at: expiresAt.toISOString(),
+      })
+      .select('id')
+      .single();
+
+    if (insertErr || !inserted) {
+      // 23505 = unique violation on chat_requests_one_pending_per_male_idx.
+      if ((insertErr as { code?: string } | null)?.code === '23505') {
+        throw new ConflictError('You already have a pending chat request.');
+      }
+      logger.error('chat-requests-send: insert failed', {
+        maleId: user.id,
+        femaleId,
+        error: insertErr?.message,
+      });
+      throw new InternalError('Failed to send chat request. Please try again.');
+    }
+
+    const chatRequestId = inserted.id as string;
+
+    // 7. Debit coins (escrow) via the canonical mutator.
+    const { data: chargeRows, error: chargeErr } = await svc.rpc('credit_coins', {
+      p_male_id: user.id,
+      p_amount: -chatCost,
+      p_type: 'chat_charge',
+      p_reference_id: chatRequestId,
+      p_description: 'Chat request escrow',
+    });
+
+    if (chargeErr || !chargeRows || (chargeRows as unknown[]).length === 0) {
+      // Roll back the row reservation so the male's "one pending" slot frees.
+      await svc.from('chat_requests').delete().eq('id', chatRequestId);
+
+      const msg = chargeErr?.message ?? '';
+      if (msg.includes('Insufficient coin balance')) {
+        // Race: balance dropped between pre-check and lock acquisition
+        // (e.g. another concurrent send / cancel reversal).
+        throw new PaymentRequiredError(
+          'Insufficient coins. Top up your wallet to continue.',
+        );
+      }
+      logger.error('chat-requests-send: charge failed', {
+        chatRequestId,
+        maleId: user.id,
+        error: msg,
+      });
+      throw new InternalError('Failed to charge coins. Please try again.');
+    }
+
+    const charge = (chargeRows as Array<{
+      transaction_id: string;
+      previous_balance: number;
+      new_balance: number;
+    }>)[0];
+
+    // 8. Backfill charge_transaction_id on the row.
+    const { error: patchErr } = await svc
+      .from('chat_requests')
+      .update({ charge_transaction_id: charge.transaction_id })
+      .eq('id', chatRequestId);
+
+    if (patchErr) {
+      // The charge already happened and the request is live. Log and move on —
+      // the row is functional even without the back-reference; we surface the
+      // ledger id in the response so the client has it for receipts.
+      logger.warn('chat-requests-send: failed to backfill charge_transaction_id', {
+        chatRequestId,
+        error: patchErr.message,
+      });
+    }
+
+    logger.info('Chat request sent', {
+      chatRequestId,
+      maleId: user.id,
+      femaleId,
+      chatCost,
+      expiresAt: expiresAt.toISOString(),
+    });
+
+    return ok({
+      chatRequestId,
+      expiresAt: expiresAt.toISOString(),
+      coinsCharged: chatCost,
+      newCoinBalance: charge.new_balance,
+      chargeTransactionId: charge.transaction_id,
+    });
+  }),
+);
