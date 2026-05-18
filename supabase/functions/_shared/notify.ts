@@ -18,18 +18,23 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import { logger } from './logger.ts';
 
 export type NotificationType =
-  // Chat-request flow (Phase 1)
+  // Chat-request flow
   | 'chat_request_received'
   | 'chat_request_accepted'
   | 'chat_request_declined'
   | 'chat_request_cancelled'
   | 'chat_request_expired'
   | 'chat_request_missed'
+  // Payout flow
+  | 'payout_requested'
+  | 'payout_approved'
+  | 'payout_processed' // = completed (re-uses the existing enum slot)
+  | 'payout_rejected'
+  | 'payout_failed'
+  | 'payout_cancelled'
   // Reserved for future prompts
   | 'payment_success'
   | 'payment_failed'
-  | 'payout_processed'
-  | 'payout_rejected'
   | 'verification_approved'
   | 'verification_rejected'
   | 'account_suspended'

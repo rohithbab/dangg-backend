@@ -56,3 +56,15 @@ export function requireRole(user: AuthenticatedUser, ...roles: UserRole[]): void
     );
   }
 }
+
+/**
+ * Shorthand for `requireRole(user, 'admin')`. The admin auth surface is
+ * separate from end-user auth; admins live entirely off-database (there is
+ * no public.users row for them), so their identity is read from the JWT's
+ * `user_metadata.role` claim only.
+ */
+export function requireAdmin(user: AuthenticatedUser): void {
+  if (user.role !== 'admin') {
+    throw new ForbiddenError('Admin access required');
+  }
+}

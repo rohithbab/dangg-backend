@@ -186,3 +186,13 @@ verify_jwt = true
 
 [functions.chat-requests-cancel]
 verify_jwt = true
+
+# --- Payouts ----------------------------------------------------------------
+[functions.payouts-request]
+verify_jwt = true
+
+[functions.payouts-cancel]
+verify_jwt = true
+
+[functions.admin-payouts-action]
+verify_jwt = true

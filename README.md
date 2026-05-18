@@ -337,6 +337,133 @@ const { data } = await supabase
   .limit(50);
 ```
 
+## Payout flow
+
+Females accumulate `earnings_balance_coins` from accepted chat requests. This domain gives them a path to withdraw — escrowed on request, refunded on every non-success terminal state, and admin-mediated through to completion.
+
+### State machine
+
+```
+                    ┌──────────┐  admin reject   ┌──────────┐
+       request ───► │ pending  │ ──────────────► │ rejected │  (refund)
+                    └──────────┘                 └──────────┘
+                          │
+                          │ female cancel
+                          ▼
+                    ┌───────────┐
+                    │ cancelled │  (refund)
+                    └───────────┘
+
+                    ┌──────────┐ admin approve  ┌──────────┐ admin complete ┌───────────┐
+       request ───► │ pending  │ ─────────────► │ approved │ ─────────────► │ completed │
+                    └──────────┘                └──────────┘                └───────────┘
+                                                      │ admin fail
+                                                      ▼
+                                                ┌──────────┐
+                                                │  failed  │ (refund)
+                                                └──────────┘
+```
+
+### Phase 1 limitation
+
+Actual money movement happens **outside** the system. Admin pays through Razorpay dashboard / bank transfer / UPI, then records the UTR when transitioning `approved → completed`. The state machine is designed so a future Razorpay Payouts API integration can automate that final step without touching upstream code.
+
+### Conversion formula
+
+```
+payout_amount_paisa = floor(coins × COIN_VALUE_PAISA × (1 − PLATFORM_COMMISSION_PCT / 100))
+```
+
+With defaults (`COIN_VALUE_PAISA=100`, `PLATFORM_COMMISSION_PCT=30`):
+
+| Coins | Payable |
+|---:|---:|
+| 100 | 7,000 paisa = ₹70.00 |
+| 500 | 35,000 paisa = ₹350.00 |
+| 1,000 | 70,000 paisa = ₹700.00 |
+| 5,000 | 350,000 paisa = ₹3,500.00 |
+
+Each payout snapshots the rates it used at request time (`coin_value_paisa_snapshot`, `commission_pct_snapshot`) — env changes never alter in-flight payouts.
+
+### One active per female
+
+Hard-guaranteed by `payouts_one_active_per_female_idx` (partial UNIQUE on `female_id WHERE status IN ('pending','approved')`). Concurrent racers get `23505`, which `payouts-request` surfaces as `409 CONFLICT`. Terminal payouts (completed/rejected/failed/cancelled) are not constrained — females accumulate history freely.
+
+### Female endpoints
+
+```typescript
+// Request a payout
+await supabase.functions.invoke('payouts-request', {
+  body: { coinsToWithdraw: 500 },
+});
+// → { payoutId, coinsRequested: 500, payoutAmountPaisa: 35000,
+//     payoutAmountFormatted: "₹350.00", expectedDays: 3,
+//     escrowEarningId, requestedAt }
+
+// Cancel while still pending
+await supabase.functions.invoke('payouts-cancel', {
+  body: { payoutId },
+});
+// → { status: 'cancelled', refundedCoins, newEarningsBalanceCoins }
+
+// History (RLS-scoped to self)
+const { data } = await supabase
+  .from('payouts')
+  .select('*')
+  .order('created_at', { ascending: false });
+```
+
+### Admin endpoint — single consolidated transition
+
+```typescript
+// Approve (no money yet — admin will pay manually next)
+await supabase.functions.invoke('admin-payouts-action', {
+  body: { payoutId, action: 'approve', adminNotes: '...' },
+});
+
+// Reject — requires rejectionReason, refunds coins
+await supabase.functions.invoke('admin-payouts-action', {
+  body: { payoutId, action: 'reject', rejectionReason: 'Invalid UPI' },
+});
+
+// Complete — requires utrNumber (recorded from the manual transfer)
+await supabase.functions.invoke('admin-payouts-action', {
+  body: { payoutId, action: 'complete', utrNumber: 'UTR123456789' },
+});
+
+// Fail — requires failureReason, refunds coins
+await supabase.functions.invoke('admin-payouts-action', {
+  body: { payoutId, action: 'fail', failureReason: 'Bank rejected' },
+});
+```
+
+Admin auth: the function reads `user_metadata.role === 'admin'` from the JWT. Admins live entirely off-database (no `public.users` row) — the `user_role` enum is end-user-only by design.
+
+### Admin dashboard queries
+
+The partial indexes `payouts_pending_created_at_idx` and `payouts_approved_created_at_idx` keep these O(log n).
+
+```typescript
+const { data: tray } = await supabase
+  .from('payouts')
+  .select('*, female:female_id(name, profile_picture_url)')
+  .eq('status', 'pending')
+  .order('requested_at');
+```
+
+### Notifications emitted
+
+Every transition lands a row in `public.notifications` for the female (best-effort — never blocks the financial flow):
+
+| Transition | Notification type |
+|---|---|
+| request → pending | `payout_requested` |
+| pending → approved | `payout_approved` |
+| approved → completed | `payout_processed` |
+| pending → rejected | `payout_rejected` |
+| approved → failed | `payout_failed` |
+| pending → cancelled | `payout_cancelled` |
+
 ## Notifications (in-app)
 
 In-app notifications live in `public.notifications` and stream to the mobile app via Supabase Realtime. **Phase 1 has no FCM** — notifications appear instantly while the app is foregrounded and on the bell-icon screen the next time the user opens the app. The structure is forward-compatible: when FCM lands, the only file that needs to change is `_shared/notify.ts`.
