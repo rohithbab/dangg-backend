@@ -165,3 +165,14 @@ verify_jwt = true
 
 [functions.female-availability-toggle]
 verify_jwt = true
+
+# --- Payments (Razorpay) ----------------------------------------------------
+[functions.payments-create-order]
+verify_jwt = true
+
+[functions.payments-verify]
+verify_jwt = true
+
+[functions.webhooks-razorpay]
+# Auth is via Razorpay's HMAC signature in the X-Razorpay-Signature header.
+verify_jwt = false

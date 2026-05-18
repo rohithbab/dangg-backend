@@ -177,7 +177,59 @@ Deno.serve(handler(async (req) => {
 
 ## Webhook idempotency
 
-Every webhook handler (Razorpay, Supabase Auth Hook, etc.) must check an idempotency record before processing. The `webhook_events` table for this will land in a later migration; the pattern is enforced at PR review.
+Every webhook handler (Razorpay, Supabase Auth Hook, etc.) must check an idempotency record before processing. The `webhook_events` table (`UNIQUE(provider, event_id)`) is the enforcement layer — handlers `INSERT` first and treat a `23505` unique-violation as "already processed, return 200." See `supabase/functions/webhooks-razorpay/index.ts` for the canonical pattern.
+
+## Razorpay setup
+
+The payments flow uses **three** secrets, each with a distinct role:
+
+| Var | Where used | What it does |
+|---|---|---|
+| `RAZORPAY_KEY_ID` | client + server | Public-ish key id. Returned to the mobile app for the Razorpay Checkout SDK. |
+| `RAZORPAY_KEY_SECRET` | server only | HMAC-SHA256 key for verifying `payment_id\|order_id` signatures returned to the app after checkout. Also used as HTTP Basic password to call the Razorpay REST API. |
+| `RAZORPAY_WEBHOOK_SECRET` | server only | HMAC-SHA256 key for verifying `X-Razorpay-Signature` on incoming webhooks. **Different from `KEY_SECRET`.** Set in Razorpay Dashboard → Webhooks. |
+
+### One-time test-mode setup
+
+1. Sign up at [razorpay.com](https://razorpay.com) — test mode is enabled by default, no KYC needed.
+2. Dashboard → **Settings → API Keys → Generate Test Key** → copy `KEY_ID` and `KEY_SECRET` into `.env`.
+3. Expose your local Edge Function URL to the internet so Razorpay can deliver webhooks:
+   ```bash
+   ngrok http 54321
+   ```
+4. Dashboard → **Settings → Webhooks → Add New Webhook**:
+   - URL: `https://<your-ngrok-id>.ngrok.io/functions/v1/webhooks-razorpay`
+   - Secret: generate a random string, copy into `RAZORPAY_WEBHOOK_SECRET` in `.env`.
+   - Events: subscribe to `payment.captured`, `payment.failed`, `refund.processed`.
+5. Restart the stack so Edge Functions pick up the new env: `supabase stop && supabase start`.
+
+### Test cards (test mode only)
+
+| Card | Result |
+|---|---|
+| `4111 1111 1111 1111` | Success |
+| `5104 0600 0000 0008` | Success (Mastercard) |
+| `4000 0000 0000 0002` | Declined |
+
+Any future expiry, any 3-digit CVV. UPI test handle: `success@razorpay`.
+
+### End-to-end flow
+
+```
+[App] ──► payments-create-order ─┐
+                                  ├─► Razorpay REST API ──► returns order_id
+[App] ◄──────────────────────────┘
+[App] ──► Razorpay Checkout SDK (in-app)
+[App] ◄── { razorpay_payment_id, razorpay_signature }
+[App] ──► payments-verify ──► verifies signature ──► credit_coins()
+                                                          │
+[Razorpay] ──► webhooks-razorpay ──► UNIQUE idempotency  │
+                                  └─► credit_coins() ◄───┘
+                                       (either path wins,
+                                        the other is a no-op)
+```
+
+The webhook is the **source of truth**. `payments-verify` is a UX optimization that credits coins immediately while the app is foregrounded; if it loses the race against the webhook, the second `UPDATE … WHERE status = 'initiated'` matches zero rows and the function returns the already-credited result.
 
 ## Common Query Patterns
 
