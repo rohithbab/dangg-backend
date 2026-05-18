@@ -18,6 +18,7 @@ import {
   ValidationError,
 } from '../_shared/errors.ts';
 import { logger } from '../_shared/logger.ts';
+import { getUserDisplayName, notify } from '../_shared/notify.ts';
 import { handler, ok } from '../_shared/responses.ts';
 import { serviceClient } from '../_shared/supabase-client.ts';
 import { parseBody, z } from '../_shared/validation.ts';
@@ -45,7 +46,7 @@ Deno.serve(
 
     const { data: cr, error: fetchErr } = await svc
       .from('chat_requests')
-      .select('id, male_id, status, chat_cost_coins')
+      .select('id, male_id, female_id, status, chat_cost_coins')
       .eq('id', chatRequestId)
       .maybeSingle();
 
@@ -138,6 +139,20 @@ Deno.serve(
       chatRequestId,
       maleId: user.id,
       refundCoins: cr.chat_cost_coins,
+    });
+
+    // Notify the female that the male pulled the request — best-effort.
+    const cancelName = await getUserDisplayName(svc, user.id);
+    await notify(svc, {
+      recipientId: cr.female_id,
+      type: 'chat_request_cancelled',
+      title: 'Chat request cancelled',
+      body: `${cancelName} cancelled their chat request`,
+      data: {
+        chat_request_id: cr.id,
+        from_user_id: user.id,
+        from_user_name: cancelName,
+      },
     });
 
     return ok({

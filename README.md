@@ -337,6 +337,87 @@ const { data } = await supabase
   .limit(50);
 ```
 
+## Notifications (in-app)
+
+In-app notifications live in `public.notifications` and stream to the mobile app via Supabase Realtime. **Phase 1 has no FCM** — notifications appear instantly while the app is foregrounded and on the bell-icon screen the next time the user opens the app. The structure is forward-compatible: when FCM lands, the only file that needs to change is `_shared/notify.ts`.
+
+### Notification types (Phase 1)
+
+| Type | Recipient | Trigger |
+|---|---|---|
+| `chat_request_received` | female | male sends a chat request |
+| `chat_request_accepted` | male | female accepts |
+| `chat_request_declined` | male | female declines |
+| `chat_request_cancelled` | female | male cancels before female responds |
+| `chat_request_expired` | male | request timed out (cron) — male side |
+| `chat_request_missed` | female | request timed out (cron) — female side |
+
+(Enum slots for `payment_*`, `payout_*`, `verification_*`, `account_suspended`, `system` are reserved for future prompts — no schema change needed when they land.)
+
+### Mobile integration
+
+```typescript
+// Live notifications while the app is open
+const channel = supabase
+  .channel('my-notifications')
+  .on('postgres_changes', {
+    event: 'INSERT',
+    schema: 'public',
+    table: 'notifications',
+    filter: `recipient_id=eq.${myUserId}`,
+  }, ({ new: row }) => {
+    showInAppToast(row);
+    incrementBellBadge();
+  })
+  .subscribe();
+
+// Bell-icon screen — newest first
+const { data } = await supabase
+  .from('notifications')
+  .select('*')
+  .order('created_at', { ascending: false })
+  .limit(50);
+
+// Unread badge count — uses partial index, cheap at any scale
+const { count } = await supabase
+  .from('notifications')
+  .select('id', { count: 'exact', head: true })
+  .eq('is_read', false);
+
+// Mark one as read
+await supabase
+  .from('notifications')
+  .update({ is_read: true, read_at: new Date().toISOString() })
+  .eq('id', notificationId);
+
+// Mark all as read
+await supabase
+  .from('notifications')
+  .update({ is_read: true, read_at: new Date().toISOString() })
+  .eq('is_read', false);
+```
+
+The UPDATE policy permits only `is_read` and `read_at` to change — every other column is pinned via the WITH CHECK self-subquery and any attempt to mutate `title` / `body` / `type` / `data` / `recipient_id` returns `42501` "new row violates row-level security policy".
+
+### Adding new notification triggers
+
+From any Edge Function:
+
+```typescript
+import { notify, getUserDisplayName } from '../_shared/notify.ts';
+
+const senderName = await getUserDisplayName(svc, senderId);
+await notify(svc, {
+  recipientId: targetUserId,
+  type: 'some_event',
+  title: 'Title shown in inbox',
+  body: `${senderName} did the thing`,
+  data: { event_id: '...', from_user_id: senderId },
+});
+```
+
+`notify()` is **best-effort by design** — it never throws. If the insert fails it logs via the structured logger and returns `false`; the calling flow continues unaffected. This is the rule across every caller: notifications must never block financial transactions.
+
 ## Common Query Patterns
 
 Most browse + favorites flows are direct PostgREST calls — RLS enforces access, no Edge Function needed. The mobile app does this directly via the Supabase SDK.

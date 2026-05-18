@@ -32,6 +32,7 @@ import {
   ValidationError,
 } from '../_shared/errors.ts';
 import { logger } from '../_shared/logger.ts';
+import { getUserDisplayName, notify } from '../_shared/notify.ts';
 import { handler, ok } from '../_shared/responses.ts';
 import { serviceClient } from '../_shared/supabase-client.ts';
 import { parseBody, z } from '../_shared/validation.ts';
@@ -249,6 +250,22 @@ Deno.serve(
         error: patchErr.message,
       });
     }
+
+    // 9. Notify the female (best-effort — notify() never throws).
+    const senderName = await getUserDisplayName(svc, user.id);
+    await notify(svc, {
+      recipientId: femaleId,
+      type: 'chat_request_received',
+      title: 'New chat request',
+      body: `${senderName} wants to chat with you`,
+      data: {
+        chat_request_id: chatRequestId,
+        from_user_id: user.id,
+        from_user_name: senderName,
+        chat_cost_coins: chatCost,
+        expires_at: expiresAt.toISOString(),
+      },
+    });
 
     logger.info('Chat request sent', {
       chatRequestId,

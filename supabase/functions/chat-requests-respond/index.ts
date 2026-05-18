@@ -28,6 +28,7 @@ import {
   ValidationError,
 } from '../_shared/errors.ts';
 import { logger } from '../_shared/logger.ts';
+import { getUserDisplayName, notify } from '../_shared/notify.ts';
 import { handler, ok } from '../_shared/responses.ts';
 import { serviceClient } from '../_shared/supabase-client.ts';
 import { parseBody, z } from '../_shared/validation.ts';
@@ -172,6 +173,20 @@ Deno.serve(
         earningCoins: cr.chat_cost_coins,
       });
 
+      // Notify the male — best-effort.
+      const acceptName = await getUserDisplayName(svc, user.id);
+      await notify(svc, {
+        recipientId: cr.male_id,
+        type: 'chat_request_accepted',
+        title: 'Chat request accepted!',
+        body: `${acceptName} accepted your chat request`,
+        data: {
+          chat_request_id: cr.id,
+          from_user_id: user.id,
+          from_user_name: acceptName,
+        },
+      });
+
       return ok({
         status: 'accepted',
         earningId: earning.earning_id,
@@ -249,6 +264,21 @@ Deno.serve(
       femaleId: user.id,
       maleId: cr.male_id,
       refundCoins: cr.chat_cost_coins,
+    });
+
+    // Notify the male — best-effort.
+    const declineName = await getUserDisplayName(svc, user.id);
+    await notify(svc, {
+      recipientId: cr.male_id,
+      type: 'chat_request_declined',
+      title: 'Chat request declined',
+      body: `${declineName} declined your chat request. Coins refunded.`,
+      data: {
+        chat_request_id: cr.id,
+        from_user_id: user.id,
+        from_user_name: declineName,
+        refund_coins: cr.chat_cost_coins,
+      },
     });
 
     return ok({
