@@ -179,9 +179,103 @@ Deno.serve(handler(async (req) => {
 
 Every webhook handler (Razorpay, Supabase Auth Hook, etc.) must check an idempotency record before processing. The `webhook_events` table for this will land in a later migration; the pattern is enforced at PR review.
 
+## Common Query Patterns
+
+Most browse + favorites flows are direct PostgREST calls — RLS enforces access, no Edge Function needed. The mobile app does this directly via the Supabase SDK.
+
+### Browse females (paginated, sorted, filtered)
+```typescript
+const { data, error } = await supabase
+  .from('females_available_view')
+  .select('*')
+  .eq('is_online', true)                  // optional online filter
+  .gte('rating_avg', 4)                    // optional rating filter
+  .lte('coin_price', 100)                  // optional price filter
+  .order('rating_avg', { ascending: false })
+  .range(0, 19);                           // pagination: first 20
+```
+
+### Get single female profile preview
+```typescript
+const { data, error } = await supabase
+  .from('females_available_view')
+  .select('*')
+  .eq('female_id', femaleId)
+  .single();
+```
+
+### List my favorites (with the female's preview data)
+```typescript
+const { data, error } = await supabase
+  .from('favorites')
+  .select(`
+    female_id,
+    created_at,
+    female:female_id (
+      id,
+      name,
+      age,
+      profile_picture_url
+    )
+  `)
+  .order('created_at', { ascending: false });
+```
+The nested join targets `users` (since `favorites.female_id` references `public.users(id)`). For a richer preview that includes online status + price, fetch the IDs first then query `females_available_view` with `in_('female_id', ids)`.
+
+### Add a favorite
+```typescript
+const { error } = await supabase
+  .from('favorites')
+  .insert({ male_id: user.id, female_id: femaleId });
+// RLS rejects unless: auth.uid() = male_id, current_user_role() = 'male',
+// and the female is verified / active / non-suspended.
+```
+
+### Remove a favorite
+```typescript
+const { error } = await supabase
+  .from('favorites')
+  .delete()
+  .eq('female_id', femaleId);
+// RLS auto-scopes by male_id = auth.uid().
+```
+
+### Toggle online (female-only)
+```typescript
+const { data, error } = await supabase.functions.invoke('female-availability-toggle', {
+  body: { isOnline: true },
+});
+// Returns: { ok: true, data: { isOnline: true, lastOnlineAt: "2026-..." } }
+// Error codes: FORBIDDEN (unverified), CONFLICT (no payout_details), INTERNAL_ERROR
+```
+
+### Subscribe to online presence changes (males browsing)
+```typescript
+const channel = supabase
+  .channel('female-presence')
+  .on('postgres_changes',
+    { event: 'UPDATE',
+      schema: 'public',
+      table: 'females',
+      filter: 'verification_status=eq.verified' },
+    (payload) => {
+      // payload.new contains the updated row — update the card's online dot.
+    },
+  )
+  .subscribe();
+```
+
 ## Testing
 
-Placeholder. Once the auth flow ships, we'll wire pgTAP tests in `tests/database/` and Deno-test in `tests/functions/`.
+pgTAP tests live under `supabase/tests/database/`. Run with:
+
+```bash
+supabase test db
+```
+
+Tests run inside a single transaction that rolls back, so no state persists. The first test suite (`01_browse_and_favorites.sql`) proves the privacy invariants of this domain: males can't read payout_details, can't favorite themselves / other males / unverified females; the browse view exposes only the column allowlist; etc.
+
+Deno-test for Edge Functions lives under `tests/functions/` — placeholder for now.
 
 ## Deployment
 
