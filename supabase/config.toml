@@ -1,0 +1,164 @@
+# =============================================================================
+# Dangg backend — Supabase local stack configuration
+#
+# This file controls the local development environment spun up by
+# `supabase start` (Docker-based Postgres + Auth + Storage + Realtime +
+# Studio + Inbucket). Production settings live in the Supabase dashboard.
+#
+# Reference: https://supabase.com/docs/guides/local-development/cli/config
+# =============================================================================
+
+# Unique project identifier — namespaces Docker containers. Don't change
+# after the stack has been started, or run `supabase stop --no-backup` first.
+project_id = "dangg-backend"
+
+# -----------------------------------------------------------------------------
+# Postgres API — PostgREST exposes every public table as a REST endpoint,
+# subject to row-level security policies.
+# -----------------------------------------------------------------------------
+[api]
+enabled = true
+port = 54321
+schemas = ["public", "storage", "graphql_public"]
+extra_search_path = ["public", "extensions"]
+# Cap response rows so a missing `.limit()` doesn't take the API down.
+max_rows = 1000
+
+[api.tls]
+enabled = false
+
+# -----------------------------------------------------------------------------
+# Postgres database
+# -----------------------------------------------------------------------------
+[db]
+port = 54322
+shadow_port = 54320
+# Supabase Cloud runs Postgres 15 — pin the same locally for parity.
+major_version = 15
+
+[db.pooler]
+enabled = false
+port = 54329
+pool_mode = "transaction"
+default_pool_size = 20
+max_client_conn = 100
+
+[db.seed]
+enabled = true
+sql_paths = ["./seed.sql"]
+
+# -----------------------------------------------------------------------------
+# Supabase Studio — web UI at http://localhost:54323
+# -----------------------------------------------------------------------------
+[studio]
+enabled = true
+port = 54323
+api_url = "http://127.0.0.1"
+
+# -----------------------------------------------------------------------------
+# Inbucket — local SMTP / SMS catcher for testing OTP delivery without
+# hitting MSG91. Visit http://localhost:54324 to see "sent" messages.
+# -----------------------------------------------------------------------------
+[inbucket]
+enabled = true
+port = 54324
+
+# -----------------------------------------------------------------------------
+# Storage — verification photos live in a private bucket here.
+# -----------------------------------------------------------------------------
+[storage]
+enabled = true
+# 50 MiB per upload — verification selfies are <2 MiB; this leaves headroom.
+file_size_limit = "50MiB"
+
+[storage.image_transformation]
+enabled = true
+
+# -----------------------------------------------------------------------------
+# Authentication — phone-only OTP for end users. Admin auth lives separately.
+# -----------------------------------------------------------------------------
+[auth]
+enabled = true
+site_url = "http://localhost:54321"
+additional_redirect_urls = ["http://localhost:54321"]
+
+# JWT lifetime — short-lived; refresh tokens carry long-term identity.
+jwt_expiry = 3600
+# Rotate refresh tokens on every use — invalidates stolen tokens.
+enable_refresh_token_rotation = true
+# Block a token re-use within this window so the client can retry a failed
+# refresh without locking the user out.
+refresh_token_reuse_interval = 10
+
+enable_signup = true
+enable_anonymous_sign_ins = false
+enable_manual_linking = false
+minimum_password_length = 8
+
+[auth.email]
+# Email auth disabled — Dangg is phone-only.
+enable_signup = false
+enable_confirmations = false
+double_confirm_changes = true
+secure_password_change = true
+
+[auth.sms]
+enable_signup = true
+enable_confirmations = true
+template = "Your Dangg verification code is {{ .Code }}"
+
+[auth.sms.test_otp]
+# Local development: deterministic OTPs without hitting MSG91. Pairs of
+# "<E.164 phone>" = "<6-digit code>". Add entries as needed.
+
+# -----------------------------------------------------------------------------
+# Auth hooks — Edge Functions Supabase invokes for custom flows
+# -----------------------------------------------------------------------------
+# Send SMS Hook: Supabase calls this when it needs to deliver an OTP. The
+# `send-sms-hook` Edge Function proxies the request to MSG91.
+#
+# `host.docker.internal` resolves to the host machine from inside the Auth
+# container so the call reaches the Edge Runtime running on port 54321.
+[auth.hook.send_sms]
+enabled = true
+uri = "http://host.docker.internal:54321/functions/v1/send-sms-hook"
+secrets = "env(SEND_SMS_HOOK_SECRET)"
+
+# -----------------------------------------------------------------------------
+# Realtime — websocket broadcasts for chat requests, presence, notifications
+# -----------------------------------------------------------------------------
+[realtime]
+enabled = true
+ip_version = "IPv4"
+
+# -----------------------------------------------------------------------------
+# Edge Functions (Deno runtime). Functions are deployed individually via
+# `supabase functions deploy <name>`. `serve` runs every function locally.
+# -----------------------------------------------------------------------------
+[edge_runtime]
+enabled = true
+inspector_port = 8083
+policy = "oneshot"
+
+[functions]
+# Per-function overrides go in a `[functions.<name>]` block.
+
+[functions.config-app]
+verify_jwt = false
+
+[functions.send-sms-hook]
+# Webhook auth is via signature; no Supabase JWT is present on the request.
+verify_jwt = false
+
+# --- Cloudinary + profile-picture endpoints (JWT-gated user actions) --------
+[functions.cloudinary-sign]
+verify_jwt = true
+
+[functions.profile-picture-upload]
+verify_jwt = true
+
+[functions.profile-picture-confirm]
+verify_jwt = true
+
+[functions.profile-picture]
+verify_jwt = true

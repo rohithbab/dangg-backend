@@ -1,0 +1,27 @@
+{
+  "imports": {
+    "@supabase/supabase-js": "https://esm.sh/@supabase/supabase-js@2",
+    "zod": "https://esm.sh/zod@3.23.8"
+  },
+  "fmt": {
+    "include": ["supabase/functions/"],
+    "useTabs": false,
+    "lineWidth": 100,
+    "indentWidth": 2,
+    "singleQuote": true,
+    "semiColons": true
+  },
+  "lint": {
+    "include": ["supabase/functions/"],
+    "rules": {
+      "tags": ["recommended"]
+    }
+  },
+  "tasks": {
+    "fmt": "deno fmt supabase/functions/",
+    "fmt:check": "deno fmt --check supabase/functions/",
+    "lint": "deno lint supabase/functions/",
+    "check": "deno check supabase/functions/**/index.ts",
+    "verify": "deno fmt --check supabase/functions/ && deno lint supabase/functions/ && deno check supabase/functions/**/index.ts"
+  }
+}
