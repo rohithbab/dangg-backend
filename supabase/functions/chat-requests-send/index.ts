@@ -121,6 +121,32 @@ Deno.serve(
       throw new InternalError('Invalid chat cost configuration');
     }
 
+    // 3b. Bidirectional block check. Both directions in one query so the
+    //     error stays deliberately generic — never leak which side
+    //     authored the block (preserves user_blocks' unidirectional
+    //     disclosure invariant).
+    const { data: blockRow, error: blockErr } = await svc
+      .from('user_blocks')
+      .select('id')
+      .or(
+        `and(blocker_id.eq.${user.id},blocked_id.eq.${femaleId}),` +
+          `and(blocker_id.eq.${femaleId},blocked_id.eq.${user.id})`,
+      )
+      .limit(1)
+      .maybeSingle();
+
+    if (blockErr) {
+      logger.error('chat-requests-send: block lookup failed', {
+        maleId: user.id,
+        femaleId,
+        error: blockErr.message,
+      });
+      throw new InternalError('Could not verify block status');
+    }
+    if (blockRow) {
+      throw new ForbiddenError('Cannot send chat request to this user.');
+    }
+
     // 4. Friendly pre-check — the partial unique index is the hard guard,
     //    but this lets us return a meaningful 409 instead of a Postgres
     //    constraint message.

@@ -196,3 +196,24 @@ verify_jwt = true
 
 [functions.admin-payouts-action]
 verify_jwt = true
+
+# --- Stats ------------------------------------------------------------------
+[functions.stats-female]
+verify_jwt = true
+
+[functions.stats-male]
+verify_jwt = true
+
+# --- Reports ----------------------------------------------------------------
+[functions.reports-submit]
+verify_jwt = true
+
+[functions.reports-admin-review]
+verify_jwt = true
+
+# --- Blocks -----------------------------------------------------------------
+[functions.users-block]
+verify_jwt = true
+
+[functions.users-unblock]
+verify_jwt = true

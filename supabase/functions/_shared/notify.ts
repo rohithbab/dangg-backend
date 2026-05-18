@@ -37,6 +37,7 @@ export type NotificationType =
   | 'payment_failed'
   | 'verification_approved'
   | 'verification_rejected'
+  | 'account_warning'
   | 'account_suspended'
   | 'system';
 

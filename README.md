@@ -337,6 +337,90 @@ const { data } = await supabase
   .limit(50);
 ```
 
+## Stats, Reports, Blocks
+
+Three light moderation / dashboard surfaces shipped together because they share infrastructure (the suspended-flag cascade through `females_available_view` and the in-app notification channel).
+
+### Stats endpoints
+
+Two JWT-gated Edge Functions return one shaped JSON payload each. Both run 7 queries in parallel under the hood and finish in well under 100 ms with the indexes from the prior prompts plus the four added in this one.
+
+```typescript
+// Female dashboard
+const { data } = await supabase.functions.invoke('stats-female');
+// → { balance, earnings (lifetime/month/week), requests, profile, recent_activity }
+
+// Male dashboard
+const { data } = await supabase.functions.invoke('stats-male');
+// → { balance, lifetime_purchase, spending, requests, favorites_count, pending_request, recent_activity }
+```
+
+Time windows are UTC-based (`this_week` = since most-recent Sunday 00:00 UTC). For IST-relative windows, do the conversion client-side or extend the function with a timezone param.
+
+### Reports
+
+User-to-user reporting with admin moderation. Anyone can report anyone (except themselves). Reports cap at **5 per reporter per 24 hours** as anti-spam.
+
+```
+                  submit             admin review
+   (none) ────────────────→ submitted ────────────────→ action_taken / dismissed
+```
+
+| Admin action | Effect |
+|---|---|
+| `dismissed` | Report closed. No notification. |
+| `warning_issued` | `account_warning` notification sent to the reported user. |
+| `account_suspended` | `users.is_suspended = TRUE` + `account_suspended` notification. Cascades through `females_available_view` (filtered out) and `chat-requests-send` (rejects). |
+
+```typescript
+// Submit
+await supabase.functions.invoke('reports-submit', {
+  body: { reportedUserId, reason: 'harassment', description: '…', contextChatRequestId: '…' },
+});
+
+// My submitted reports (RLS-scoped to reporter)
+const { data } = await supabase
+  .from('reports')
+  .select('*')
+  .order('created_at', { ascending: false });
+
+// Admin: review
+await supabase.functions.invoke('reports-admin-review', {
+  body: { reportId, action: 'warning_issued', adminNotes: 'Be respectful.' },
+});
+```
+
+The reported user does NOT have RLS read access to reports against them (anti-retaliation). Admin reads via `is_admin()` JWT-claim helper (same surface that gates payout admin actions).
+
+### Blocks
+
+Bidirectional in **effect**, unidirectional in **disclosure**.
+
+If A blocks B:
+- A no longer sees B in `females_available_view` (and B no longer sees A) — the view's WHERE clause has a `NOT EXISTS` in each direction.
+- Neither side can send a chat request — `chat-requests-send` checks both directions with a deliberately generic 403 message ("Cannot send chat request to this user.") so the blocked side cannot infer who blocked whom.
+- B does NOT have RLS read access to `user_blocks` — they can't see the block exists.
+
+Already-pending chat requests are **not auto-cancelled** on block; admin can manually intervene. Out of scope for v1.
+
+```typescript
+// Block
+await supabase.functions.invoke('users-block', {
+  body: { blockedUserId, reason: 'Inappropriate' },  // reason optional
+});
+
+// Unblock (idempotent)
+await supabase.functions.invoke('users-unblock', {
+  body: { blockedUserId },
+});
+
+// My blocks
+const { data } = await supabase
+  .from('user_blocks')
+  .select('blocked_id, reason, created_at')
+  .order('created_at', { ascending: false });
+```
+
 ## Payout flow
 
 Females accumulate `earnings_balance_coins` from accepted chat requests. This domain gives them a path to withdraw — escrowed on request, refunded on every non-success terminal state, and admin-mediated through to completion.
