@@ -110,6 +110,23 @@ template = "Your Dangg verification code is {{ .Code }}"
 [auth.sms.test_otp]
 # Local development: deterministic OTPs without hitting MSG91. Pairs of
 # "<E.164 phone>" = "<6-digit code>". Add entries as needed.
+# These phones short-circuit the Send SMS Hook; enter the bare 10-digit
+# number in the app (the client prefixes +91) and use code 123456.
+"+919000000001" = "123456"
+"+919000000002" = "123456"
+"+919000000003" = "123456"
+"+919000000004" = "123456"
+
+# A provider must be enabled for the CLI to turn on phone auth
+# (GOTRUE_EXTERNAL_PHONE_ENABLED). This dummy Twilio block does that. It is
+# never actually called: the send_sms hook below handles real delivery (MSG91)
+# and the test_otp entries above short-circuit the test phones. Prod uses the
+# hook, so these dummy values stay local-only.
+[auth.sms.twilio]
+enabled = true
+account_sid = "local_dummy_sid"
+message_service_sid = "local_dummy_msg_service"
+auth_token = "env(SMS_TWILIO_AUTH_TOKEN)"
 
 # -----------------------------------------------------------------------------
 # Auth hooks — Edge Functions Supabase invokes for custom flows
@@ -161,6 +178,13 @@ verify_jwt = true
 verify_jwt = true
 
 [functions.profile-picture]
+verify_jwt = true
+
+[functions.verification-photo-submit]
+verify_jwt = true
+
+# Cloudflare R2 presigned uploads (dangg-media bucket).
+[functions.media-sign]
 verify_jwt = true
 
 [functions.female-availability-toggle]

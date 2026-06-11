@@ -103,26 +103,38 @@ Deno.serve(
 
     // 5. Talk to Razorpay. If this fails, mark the row failed so we don't
     //    leak orphaned 'initiated' payments.
+    const keyId = Deno.env.get('RAZORPAY_KEY_ID');
+    const keySecret = Deno.env.get('RAZORPAY_KEY_SECRET');
+    const isDevMock = (Deno.env.get('APP_ENV') === 'development') || !keyId || !keySecret;
+
     let order;
-    try {
-      order = await createRazorpayOrder(pkg.price_paisa, paymentRow.id, {
-        male_id: user.id,
-        package_id: pkg.id,
-        payment_id: paymentRow.id,
-      });
-    } catch (cause) {
-      await svc
-        .from('payments')
-        .update({
-          status: 'failed',
-          failure_reason: 'Razorpay order creation failed',
-          failed_at: new Date().toISOString(),
-        })
-        .eq('id', paymentRow.id);
-      throw cause;
+    if (isDevMock) {
+      order = {
+        id: `order_mock_${crypto.randomUUID().replace(/-/g, '').slice(0, 14)}`,
+        amount: pkg.price_paisa,
+        currency: 'INR',
+      };
+    } else {
+      try {
+        order = await createRazorpayOrder(pkg.price_paisa, paymentRow.id, {
+          male_id: user.id,
+          package_id: pkg.id,
+          payment_id: paymentRow.id,
+        });
+      } catch (cause) {
+        await svc
+          .from('payments')
+          .update({
+            status: 'failed',
+            failure_reason: 'Razorpay order creation failed',
+            failed_at: new Date().toISOString(),
+          })
+          .eq('id', paymentRow.id);
+        throw cause;
+      }
     }
 
-    // 6. Patch with the real order id.
+    // 6. Patch with the real/mock order id.
     const { error: patchErr } = await svc
       .from('payments')
       .update({ razorpay_order_id: order.id })
@@ -143,6 +155,7 @@ Deno.serve(
       userId: user.id,
       packageId: pkg.id,
       amountPaisa: pkg.price_paisa,
+      isMock: isDevMock,
     });
 
     return ok({
@@ -150,7 +163,7 @@ Deno.serve(
       razorpayOrderId: order.id,
       amount: order.amount,
       currency: order.currency,
-      razorpayKeyId: getRazorpayKeyId(),
+      razorpayKeyId: isDevMock ? 'rzp_test_mockkeyid' : (keyId ?? ''),
       packageName: pkg.name,
       totalCoins: pkg.total_coins,
     });

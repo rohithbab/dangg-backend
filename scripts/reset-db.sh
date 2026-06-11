@@ -10,4 +10,5 @@ if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
 fi
 
 supabase db reset
+node scripts/seed-local-dev.mjs
 echo "Database reset complete."

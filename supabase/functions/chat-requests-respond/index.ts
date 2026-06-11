@@ -15,7 +15,8 @@
  *
  * Auth:    JWT (female)
  * Body:    { chatRequestId: uuid, action: 'accept' | 'decline' }
- * Returns: accept  → { status:'accepted', earningId, newEarningsBalanceCoins }
+ * Returns: accept  → { status:'accepted', chatSessionId, earningId,
+ *                       newEarningsBalanceCoins }
  *          decline → { status:'declined', refundTransactionId }
  */
 import { requireAuth, requireRole } from '../_shared/auth.ts';
@@ -122,7 +123,49 @@ Deno.serve(
         new_balance_coins: number;
       }>)[0];
 
-      // 4b. Atomic state flip — eq.status='pending' guards against concurrent
+      // 4b. Create the live chat session before flipping the request. If the
+      //     status flip loses the race, this session is deleted below along
+      //     with the earnings reversal.
+      const { data: sessionRow, error: sessionErr } = await svc
+        .from('chat_sessions')
+        .insert({
+          chat_request_id: cr.id,
+          male_id: cr.male_id,
+          female_id: user.id,
+          status: 'active',
+          started_at: respondedAt,
+        })
+        .select('id')
+        .single();
+
+      if (sessionErr || !sessionRow) {
+        const { error: reverseErr } = await svc.rpc('credit_female_earnings', {
+          p_female_id: user.id,
+          p_amount: -cr.chat_cost_coins,
+          p_type: 'chat_earning_reversed',
+          p_reference_id: cr.id,
+          p_description: 'Reversed: chat session creation failed',
+        });
+        if (reverseErr) {
+          logger.error('chat-requests-respond: session-create reversal FAILED', {
+            chatRequestId,
+            femaleId: user.id,
+            earningId: earning.earning_id,
+            error: reverseErr.message,
+          });
+        }
+        logger.error('chat-requests-respond: session create failed', {
+          chatRequestId,
+          femaleId: user.id,
+          maleId: cr.male_id,
+          error: sessionErr?.message,
+        });
+        throw new InternalError('Failed to start chat session. Please try again.');
+      }
+
+      const chatSessionId = sessionRow.id as string;
+
+      // 4c. Atomic state flip — eq.status='pending' guards against concurrent
       //     decline / cancel / expire. .select() returns the updated row, or
       //     empty if no row matched.
       const { data: updatedRows, error: updateErr } = await svc
@@ -138,6 +181,8 @@ Deno.serve(
         .select('id');
 
       if (updateErr || !updatedRows || updatedRows.length === 0) {
+        await svc.from('chat_sessions').delete().eq('id', chatSessionId);
+
         // Reverse the earnings credit — the row transitioned without us.
         const { error: reverseErr } = await svc.rpc('credit_female_earnings', {
           p_female_id: user.id,
@@ -168,6 +213,7 @@ Deno.serve(
 
       logger.info('Chat request accepted', {
         chatRequestId,
+        chatSessionId,
         femaleId: user.id,
         maleId: cr.male_id,
         earningCoins: cr.chat_cost_coins,
@@ -182,6 +228,7 @@ Deno.serve(
         body: `${acceptName} accepted your chat request`,
         data: {
           chat_request_id: cr.id,
+          chat_session_id: chatSessionId,
           from_user_id: user.id,
           from_user_name: acceptName,
         },
@@ -189,6 +236,7 @@ Deno.serve(
 
       return ok({
         status: 'accepted',
+        chatSessionId,
         earningId: earning.earning_id,
         newEarningsBalanceCoins: earning.new_balance_coins,
       });

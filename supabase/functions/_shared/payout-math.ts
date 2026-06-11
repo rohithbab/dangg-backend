@@ -12,8 +12,8 @@
  * `payouts.commission_pct_snapshot`.
  */
 
-const COIN_VALUE_PAISA_DEFAULT = 100; // 1 coin = ₹1
-const PLATFORM_COMMISSION_PCT_DEFAULT = 30; // platform keeps 30%
+const COIN_VALUE_PAISA_DEFAULT = 22; // 1 coin = ₹0.22 (₹99 pack ÷ 450 coins)
+const PLATFORM_COMMISSION_PCT_DEFAULT = 60; // platform keeps 60%, female nets 40%
 const MIN_PAYOUT_COINS_DEFAULT = 100; // floor on a single payout request
 const PAYOUT_PROCESSING_DAYS_DEFAULT = 3; // display only
 

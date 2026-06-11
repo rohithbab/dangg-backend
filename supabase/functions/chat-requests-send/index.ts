@@ -187,9 +187,39 @@ Deno.serve(
       throw new InternalError('Could not load wallet');
     }
     if (maleRow.coin_balance < chatCost) {
-      throw new PaymentRequiredError(
-        `Insufficient coins. You have ${maleRow.coin_balance}; need ${chatCost}.`,
-      );
+      // DEV ONLY: mock a wallet top-up so the request flow (and the female's
+      // incoming slideable card) can be exercised without a real Razorpay
+      // purchase. Strictly gated on APP_ENV=development — never grants free
+      // coins in staging/production, where the PaymentRequired below stands.
+      const isDev = (Deno.env.get('APP_ENV') ?? '').toLowerCase() === 'development';
+      if (isDev) {
+        const grant = Math.max(chatCost, 1000);
+        const { error: grantErr } = await svc.rpc('credit_coins', {
+          p_male_id: user.id,
+          p_amount: grant,
+          p_type: 'admin_adjustment',
+          p_reference_id: null,
+          p_description: 'DEV mock coin grant (insufficient balance on send)',
+        });
+        if (grantErr) {
+          logger.error('chat-requests-send: dev coin grant failed', {
+            maleId: user.id,
+            error: grantErr.message,
+          });
+          throw new PaymentRequiredError(
+            `Insufficient coins. You have ${maleRow.coin_balance}; need ${chatCost}.`,
+          );
+        }
+        logger.info('chat-requests-send: DEV granted mock coins', {
+          maleId: user.id,
+          grant,
+          previousBalance: maleRow.coin_balance,
+        });
+      } else {
+        throw new PaymentRequiredError(
+          `Insufficient coins. You have ${maleRow.coin_balance}; need ${chatCost}.`,
+        );
+      }
     }
 
     // 6. INSERT chat_request first — this reserves the male's

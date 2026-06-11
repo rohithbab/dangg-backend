@@ -1,6 +1,7 @@
 # --- Secrets ----------------------------------------------------------------
 .env
-.env.*.local
+.env.local
+.env.*
 !.env.example
 
 # --- Supabase CLI scratch ---------------------------------------------------
@@ -21,6 +22,8 @@ npm-debug.log*
 yarn-debug.log*
 
 # --- Build / generated ------------------------------------------------------
+.deno/
+.deno_dir/
 deno.lock
 dist/
 build/

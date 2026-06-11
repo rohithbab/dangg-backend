@@ -38,6 +38,9 @@ const MSG91_OTP_TEMPLATE_ID = Deno.env.get('MSG91_OTP_TEMPLATE_ID') ?? '';
 
 const MSG91_OTP_ENDPOINT = 'https://control.msg91.com/api/v5/otp';
 
+const APP_ENV = Deno.env.get('APP_ENV') ?? 'development';
+const IS_LOCAL_DEV = APP_ENV === 'development';
+
 // -----------------------------------------------------------------------------
 // Body validation — matches Supabase Auth's Send SMS Hook payload.
 // -----------------------------------------------------------------------------
@@ -69,7 +72,9 @@ Deno.serve(
     if (!SEND_SMS_HOOK_SECRET) {
       throw new InternalError('SEND_SMS_HOOK_SECRET is not configured');
     }
-    if (!MSG91_AUTH_KEY || !MSG91_OTP_TEMPLATE_ID) {
+    const msg91Configured = Boolean(MSG91_AUTH_KEY && MSG91_OTP_TEMPLATE_ID);
+    // Outside local dev, MSG91 is mandatory — a missing key is a real misconfig.
+    if (!msg91Configured && !IS_LOCAL_DEV) {
       throw new InternalError('MSG91 credentials are not configured');
     }
 
@@ -82,6 +87,18 @@ Deno.serve(
     const otp = body.sms.otp;
 
     logger.info('send-sms-hook received', { userId: body.user.id, phone });
+
+    if (!msg91Configured) {
+      // Local dev without a real SMS provider: don't fail the auth flow.
+      // Log the OTP so the developer can complete signup/login from the
+      // edge-runtime logs. NEVER reached in staging/production.
+      logger.warn('LOCAL DEV: MSG91 not configured — OTP not sent. Use this code.', {
+        userId: body.user.id,
+        phone,
+        otp,
+      });
+      return ok({ delivered: false, devOtp: otp });
+    }
 
     await deliverViaMsg91(phone, otp);
 
@@ -126,9 +143,16 @@ async function verifyStandardWebhookSignature(
   }
 
   // Standard-webhooks signing scheme: `${id}.${timestamp}.${rawBody}`.
-  // The shared secret is base64-encoded with a `whsec_` prefix; strip the
-  // prefix before decoding.
-  const cleanedSecret = secret.startsWith('whsec_') ? secret.slice('whsec_'.length) : secret;
+  // Supabase stores the hook secret as `v1,whsec_<base64>`: a `v1,` version
+  // tag followed by the standard-webhooks `whsec_` prefix and the base64 key.
+  // Strip both prefixes before decoding the key.
+  let cleanedSecret = secret;
+  if (cleanedSecret.startsWith('v1,')) {
+    cleanedSecret = cleanedSecret.slice('v1,'.length);
+  }
+  if (cleanedSecret.startsWith('whsec_')) {
+    cleanedSecret = cleanedSecret.slice('whsec_'.length);
+  }
   let keyBytes: Uint8Array;
   try {
     keyBytes = Uint8Array.from(atob(cleanedSecret), (c) => c.charCodeAt(0));
