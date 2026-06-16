@@ -108,7 +108,7 @@ enable_confirmations = true
 template = "Your Dangg verification code is {{ .Code }}"
 
 [auth.sms.test_otp]
-# Local development: deterministic OTPs without hitting MSG91. Pairs of
+# Local development: deterministic OTPs without hitting the SMS gateway. Pairs of
 # "<E.164 phone>" = "<6-digit code>". Add entries as needed.
 # These phones short-circuit the Send SMS Hook; enter the bare 10-digit
 # number in the app (the client prefixes +91) and use code 123456.
@@ -166,6 +166,9 @@ verify_jwt = false
 [functions.send-sms-hook]
 # Webhook auth is via signature; no Supabase JWT is present on the request.
 verify_jwt = false
+
+[functions.fcm-register]
+verify_jwt = true
 
 # --- Cloudinary + profile-picture endpoints (JWT-gated user actions) --------
 [functions.cloudinary-sign]
@@ -241,3 +244,6 @@ verify_jwt = true
 
 [functions.users-unblock]
 verify_jwt = true
+
+[functions.push-dispatch]
+verify_jwt = false

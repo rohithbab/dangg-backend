@@ -10,14 +10,19 @@
  *   }
  *
  * We verify the standard-webhooks signature header against the shared
+ * `SEND_SMS_HOOK_SECRET`, then deliver the OTP via the My Dreams Technology
+ * SMS gateway. On any failure we return a non-2xx so Supabase surfaces the
+ * error to the client.
  * `SEND_SMS_HOOK_SECRET`, then proxy the OTP to My Dreams Technology.
  * On any failure we return a non-2xx so Supabase surfaces the error.
  *
  * Auth: webhook signature only — no Supabase JWT on server-to-server calls.
  */
+import { rateLimit } from '../_shared/cache.ts';
 import { handlePreflight } from '../_shared/cors.ts';
 import {
   InternalError,
+  RateLimitError,
   ServiceUnavailableError,
   UnauthorizedError,
   ValidationError,
@@ -30,6 +35,14 @@ import { parseBody, z } from '../_shared/validation.ts';
 // Env
 // -----------------------------------------------------------------------------
 const SEND_SMS_HOOK_SECRET = Deno.env.get('SEND_SMS_HOOK_SECRET') ?? '';
+
+// --- My Dreams Technology SMS gateway ---
+const MYDREAMS_API_KEY = Deno.env.get('MYDREAMS_API_KEY') ?? '';
+const MYDREAMS_SENDER_ID = Deno.env.get('MYDREAMS_SENDER_ID') ?? 'MDTDMO';
+const MYDREAMS_SMS_ENDPOINT = Deno.env.get('MYDREAMS_SMS_ENDPOINT') ??
+  'http://app.mydreamstechnology.in/vb/apikey.php';
+// Fills the 2nd `{#var#}` of the DLT-approved template.
+const SMS_APP_NAME = Deno.env.get('SMS_APP_NAME') ?? 'Dangg';
 const MYDREAMS_API_KEY = Deno.env.get('MYDREAMS_API_KEY') ?? '';
 const MYDREAMS_SENDER_ID = Deno.env.get('MYDREAMS_SENDER_ID') ?? '';
 const MYDREAMS_SMS_ENDPOINT =
@@ -67,6 +80,11 @@ Deno.serve(
     if (!SEND_SMS_HOOK_SECRET) {
       throw new InternalError('SEND_SMS_HOOK_SECRET is not configured');
     }
+    const smsConfigured = Boolean(MYDREAMS_API_KEY);
+    // Outside local dev, the SMS gateway is mandatory — a missing key is a
+    // real misconfig that must surface, not silently log the OTP.
+    if (!smsConfigured && !IS_LOCAL_DEV) {
+      throw new InternalError('My Dreams Technology API key is not configured');
 
     const smsConfigured = Boolean(MYDREAMS_API_KEY && MYDREAMS_SENDER_ID);
     if (!smsConfigured && !IS_LOCAL_DEV) {
@@ -82,6 +100,20 @@ Deno.serve(
 
     logger.info('send-sms-hook received', { userId: body.user.id, phone });
 
+    // Rate-limit OTP sends per phone — protects SMS spend + blocks hammering a
+    // number. 5 per 15 min covers signup + a few legit resends. Fails OPEN if
+    // Redis is down (never blocks a real login on an infra blip).
+    const rl = await rateLimit(`otp:${phone}`, 5, 15 * 60);
+    if (!rl.allowed) {
+      logger.warn('send-sms-hook: OTP rate limit hit', { phone, count: rl.count });
+      throw new RateLimitError('Too many OTP requests. Please wait a few minutes and try again.');
+    }
+
+    if (!smsConfigured) {
+      // Local dev without a real SMS provider: don't fail the auth flow.
+      // Log the OTP so the developer can complete signup/login from the
+      // edge-runtime logs. NEVER reached in staging/production.
+      logger.warn('LOCAL DEV: SMS gateway not configured — OTP not sent. Use this code.', {
     if (!smsConfigured) {
       logger.warn('LOCAL DEV: MyDreams not configured — OTP not sent. Use this code.', {
         userId: body.user.id,
@@ -93,6 +125,7 @@ Deno.serve(
 
     await deliverViaMyDreams(phone, otp);
 
+    logger.info('OTP delivered via My Dreams Technology', { userId: body.user.id, phone });
     logger.info('OTP delivered via MyDreams', { userId: body.user.id, phone });
 
     return ok({ delivered: true });
@@ -175,12 +208,38 @@ async function parseHookBody(raw: string): Promise<HookBody> {
   return await parseBody(req, HookBody);
 }
 
+/**
+ * Convert any incoming phone format to the digits-only national number the
+ * gateway docs show. Supabase sends E.164 (`+919876543210`); we strip non-
+ * digits and then drop a leading `91` country code so we send the 10-digit
+ * form. A bare 10-digit Indian mobile (starts 6–9) is left untouched; only a
+ * 12-digit `91…` is trimmed.
+ */
 /** Strip non-digits — MyDreams expects numbers only (no leading +). */
 function normalisePhone(phone: string): string {
-  return phone.replace(/[^0-9]/g, '');
+  const digits = phone.replace(/[^0-9]/g, '');
+  if (digits.length === 12 && digits.startsWith('91')) {
+    return digits.slice(2);
+  }
+  return digits;
 }
 
 /**
+ * Delivers the OTP via My Dreams Technology's HTTP SMS API — a GET request
+ * with the credentials and message as query params.
+ *
+ * The message MUST match the DLT-approved template exactly (Welbuilt AI,
+ * template id 1707178118046494961) or the operator scrubs it — the gateway
+ * still returns "submitted" but the SMS is never delivered. Only the two
+ * `{#var#}` slots are filled: var1 = greeting, var2 = the OTP code. All
+ * static text + punctuation below is verbatim from the registered template.
+ *
+ * Throws on a network error, a non-2xx status, or a body that looks like a
+ * gateway error (these panels often return 200 + an error string).
+ */
+async function deliverViaMyDreams(phone: string, otp: string): Promise<void> {
+  const message = `Dear ${SMS_APP_NAME}, Your OTP for login is ${otp}. Valid for 5 minutes. ` +
+    `Please do not share this OTP - Welbuilt AI Solutions Pvt Ltd.`;
  * Sends OTP via My Dreams Technology's HTTP API.
  * Endpoint: GET /vb/apikey.php?apikey=KEY&senderid=ID&number=PHONE&message=MSG&app=APP&format=json
  */
@@ -192,6 +251,7 @@ async function deliverViaMyDreams(phone: string, otp: string): Promise<void> {
     senderid: MYDREAMS_SENDER_ID,
     number: phone,
     message,
+  });
     app: SMS_APP_NAME,
     format: 'json',
   });
@@ -202,11 +262,15 @@ async function deliverViaMyDreams(phone: string, otp: string): Promise<void> {
   try {
     response = await fetch(url, { method: 'GET' });
   } catch (cause) {
+    logger.error('My Dreams SMS network failure', { error: String(cause) });
     logger.error('MyDreams network failure', { error: String(cause) });
     throw new ServiceUnavailableError('SMS provider unreachable');
   }
 
+  const text = (await response.text().catch(() => '')).trim();
+
   if (!response.ok) {
+    logger.error('My Dreams SMS non-2xx response', {
     const text = await response.text().catch(() => '<unreadable>');
     logger.error('MyDreams non-2xx response', {
       status: response.status,
@@ -215,6 +279,14 @@ async function deliverViaMyDreams(phone: string, otp: string): Promise<void> {
     throw new ServiceUnavailableError(`SMS provider rejected the request (${response.status})`);
   }
 
+  // The panel returns HTTP 200 even on logical failures, so inspect the body
+  // for obvious error markers. Tune this list once a real success body is seen.
+  if (/invalid|error|fail|unauthor|insufficient|not\s+sent/i.test(text)) {
+    logger.error('My Dreams SMS error body', { body: text.slice(0, 500) });
+    throw new ServiceUnavailableError('SMS provider returned an error');
+  }
+
+  logger.info('My Dreams SMS accepted', { body: text.slice(0, 200) });
   const text = await response.text().catch(() => '');
   logger.info('MyDreams response', { body: text.slice(0, 200) });
 }
