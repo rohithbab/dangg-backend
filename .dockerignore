@@ -1,0 +1,10 @@
+.git
+.gitignore
+docs/
+supabase/migrations/
+supabase/tests/
+supabase/seed.sql
+supabase/.branches/
+supabase/config.toml
+deno.lock
+*.md
