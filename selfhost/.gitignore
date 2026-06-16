@@ -1,0 +1,8 @@
+# Secrets — never commit the live env.
+docker/.env
+
+# Runtime data / caches (regenerated on the server).
+docker/volumes/db/data/
+docker/volumes/storage/
+docker/volumes/pooler/.cache/
+**/.cache/
