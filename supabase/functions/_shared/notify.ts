@@ -15,7 +15,6 @@
  * the design intent.
  */
 import type { SupabaseClient } from '@supabase/supabase-js';
-import { fcmConfigured, sendPushToUser } from './fcm.ts';
 import { logger } from './logger.ts';
 
 export type NotificationType =
@@ -79,20 +78,10 @@ export async function notify(svc: SupabaseClient, args: NotifyArgs): Promise<boo
 
     logger.info('notify: notification created', { recipientId, type });
 
-    // Best-effort push fan-out. Awaited so it completes within the edge
-    // request lifecycle, but never allowed to fail the inbox insert. No-op
-    // when FCM isn't configured (push dormant, in-app notification still sent).
-    if (fcmConfigured()) {
-      try {
-        await sendPushToUser(svc, recipientId, { title, body, data: { ...data, type } });
-      } catch (pushErr) {
-        logger.warn('notify: push dispatch failed', {
-          recipientId,
-          type,
-          error: pushErr instanceof Error ? pushErr.message : String(pushErr),
-        });
-      }
-    }
+    // Best-effort push fan-out is now handled asynchronously by the database
+    // trigger on the notifications table invoking the push-dispatch edge function.
+    // This decouples the push delivery, ensuring every notification source
+    // (crons, manual sql, other services) automatically fires FCM pushes.
 
     return true;
   } catch (err) {

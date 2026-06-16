@@ -1,0 +1,8 @@
+{
+  "imports": {
+    "@supabase/supabase-js": "https://esm.sh/@supabase/supabase-js@2",
+    "zod": "https://esm.sh/zod@3.23.8",
+    "aws4fetch": "https://esm.sh/aws4fetch@1.0.20",
+    "jose": "https://deno.land/x/jose@v4.14.4/index.ts"
+  }
+}

@@ -36,7 +36,7 @@ async function getClient(): Promise<Redis | null> {
       }
     })();
   }
-  return clientPromise;
+  return await clientPromise;
 }
 
 /** Returns the cached JSON value for `key`, or null on miss/error. */

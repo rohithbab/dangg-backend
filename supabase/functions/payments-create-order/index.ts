@@ -24,7 +24,7 @@ import { requireAuth, requireRole } from '../_shared/auth.ts';
 import { handlePreflight } from '../_shared/cors.ts';
 import { ConflictError, InternalError, NotFoundError, ValidationError } from '../_shared/errors.ts';
 import { logger } from '../_shared/logger.ts';
-import { createRazorpayOrder, getRazorpayKeyId } from '../_shared/razorpay.ts';
+import { createRazorpayOrder } from '../_shared/razorpay.ts';
 import { handler, ok } from '../_shared/responses.ts';
 import { serviceClient, userClient } from '../_shared/supabase-client.ts';
 import { parseBody, z } from '../_shared/validation.ts';

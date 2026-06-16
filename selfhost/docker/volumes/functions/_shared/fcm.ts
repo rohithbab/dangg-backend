@@ -48,7 +48,10 @@ export function fcmConfigured(): boolean {
 
 // -- base64url helpers --------------------------------------------------------
 function b64url(bytes: Uint8Array): string {
-  return btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  return btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(
+    /=+$/,
+    '',
+  );
 }
 const b64urlStr = (s: string): string => b64url(new TextEncoder().encode(s));
 

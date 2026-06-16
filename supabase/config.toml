@@ -244,3 +244,6 @@ verify_jwt = true
 
 [functions.users-unblock]
 verify_jwt = true
+
+[functions.push-dispatch]
+verify_jwt = false

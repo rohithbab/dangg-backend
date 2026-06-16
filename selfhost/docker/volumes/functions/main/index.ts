@@ -144,8 +144,29 @@ Deno.serve(async (req: Request) => {
   const memoryLimitMb = 150
   const workerTimeoutMs = 1 * 60 * 1000
   const noModuleCache = false
-  const importMapPath = null
+  let importMapPath: string | null = null;
+  try {
+    const denoJsonPath = `${servicePath}/deno.json`;
+    const info = await Deno.stat(denoJsonPath);
+    if (info.isFile) {
+      importMapPath = denoJsonPath;
+    }
+  } catch {
+    try {
+      const rootImportMap = '/home/deno/functions/import_map.json';
+      const info = await Deno.stat(rootImportMap);
+      if (info.isFile) {
+        importMapPath = rootImportMap;
+      }
+    } catch {
+      // no-op
+    }
+  }
+
+  console.error('push-dispatch: importMapPath resolved to:', importMapPath);
+
   const envVarsObj = Deno.env.toObject()
+
   const envVars = Object.keys(envVarsObj).map((k) => [k, envVarsObj[k]])
 
   try {
@@ -154,7 +175,7 @@ Deno.serve(async (req: Request) => {
       memoryLimitMb,
       workerTimeoutMs,
       noModuleCache,
-      importMapPath,
+      importMapPath: importMapPath ? `file://${importMapPath}` : null,
       envVars,
     })
     return await worker.fetch(req)

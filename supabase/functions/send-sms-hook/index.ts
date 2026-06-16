@@ -249,8 +249,7 @@ function normalisePhone(phone: string): string {
  * gateway error (these panels often return 200 + an error string).
  */
 async function deliverViaMyDreams(phone: string, otp: string): Promise<void> {
-  const message =
-    `Dear ${SMS_APP_NAME}, Your OTP for login is ${otp}. Valid for 5 minutes. ` +
+  const message = `Dear ${SMS_APP_NAME}, Your OTP for login is ${otp}. Valid for 5 minutes. ` +
     `Please do not share this OTP - Welbuilt AI Solutions Pvt Ltd.`;
 
   const params = new URLSearchParams({
