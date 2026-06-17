@@ -3,7 +3,7 @@
 #
 # Usage: ./scripts/deploy-function.sh <function-name>
 #
-# Prerequisite: `supabase link --project-ref <ref>` has been run once.
+# Prerequisite: `supabase link --project-ref <ref>` hass been run once.
 set -e
 
 FN_NAME="$1"
