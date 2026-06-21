@@ -19,14 +19,8 @@
 -- -----------------------------------------------------------------------------
 -- Private bucket. 10 MiB cap (selfies are < 2 MiB); image mime types only.
 -- -----------------------------------------------------------------------------
-INSERT INTO storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
-VALUES (
-  'verification-photos',
-  'verification-photos',
-  FALSE,
-  10485760,
-  ARRAY['image/jpeg', 'image/png', 'image/webp']
-)
+INSERT INTO storage.buckets (id, name)
+VALUES ('verification-photos', 'verification-photos')
 ON CONFLICT (id) DO NOTHING;
 
 -- -----------------------------------------------------------------------------
