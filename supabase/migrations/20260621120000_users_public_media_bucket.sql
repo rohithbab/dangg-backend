@@ -26,12 +26,19 @@ ON CONFLICT (id) DO UPDATE
 
 -- SELECT is required even for writes: storage-api / supabase-js do
 -- `INSERT … RETURNING *`, which needs a SELECT policy or the insert fails with
--- "new row violates row-level security policy". The bucket is public, so a
--- broad read on it is fine.
+-- "new row violates row-level security policy". Scope it to the owner's own
+-- folder (not the whole bucket): public buckets serve object URLs WITHOUT RLS,
+-- so other users still see profile pictures via the public URL, and we avoid a
+-- broad policy that would let any authenticated client LIST every file
+-- (storage linter 0025_public_bucket_allows_listing).
 DROP POLICY IF EXISTS "users_media_select" ON storage.objects;
 CREATE POLICY "users_media_select"
   ON storage.objects FOR SELECT TO authenticated
-  USING (bucket_id = 'users');
+  USING (
+    bucket_id = 'users'
+    AND (storage.foldername(name))[1] = 'profile-images'
+    AND (storage.foldername(name))[2] = auth.uid()::text
+  );
 
 -- Owner-only writes under profile-images/{auth.uid()}/…
 DROP POLICY IF EXISTS "users_media_insert_own" ON storage.objects;
