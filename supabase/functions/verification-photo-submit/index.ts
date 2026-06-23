@@ -2,8 +2,8 @@
  * POST /functions/v1/verification-photo-submit
  *
  * Called after a female uploads her verification selfie directly to the
- * private `verification-photos` Storage bucket (under her own
- * `{auth.uid()}/…` folder, enforced by storage RLS). This endpoint:
+ * private `verification` Storage bucket (under her own
+ * `photos/{auth.uid()}/…` folder, enforced by storage RLS). This endpoint:
  *   1. Validates the object path lives under the caller's own folder.
  *   2. Confirms the object actually exists in the bucket.
  *   3. Flips `females.verification_status` to 'pending' and stamps
@@ -13,7 +13,7 @@
  * already 'pending' (awaiting review) or 'verified' is rejected with 409.
  *
  * Auth:    JWT (female)
- * Body:    { objectPath: string }   e.g. "<uid>/selfie.jpg"
+ * Body:    { objectPath: string }   e.g. "photos/<uid>/selfie.jpg"
  * Returns: { verificationStatus: 'pending', submittedAt }
  */
 import { requireAuth, requireRole } from '../_shared/auth.ts';
@@ -24,10 +24,10 @@ import { handler, ok } from '../_shared/responses.ts';
 import { serviceClient } from '../_shared/supabase-client.ts';
 import { parseBody, z } from '../_shared/validation.ts';
 
-const BUCKET = 'verification-photos';
+const BUCKET = 'verification';
 
 const Body = z.object({
-  /** Storage object path the client uploaded to, e.g. "<uid>/selfie.jpg". */
+  /** Storage object path the client uploaded to, e.g. "photos/<uid>/selfie.jpg". */
   objectPath: z.string().min(3).max(300),
 });
 
@@ -50,7 +50,7 @@ Deno.serve(
     // 2. The path must live under the caller's own folder. Storage RLS
     //    already enforces this on upload, but re-validate here so a client
     //    can't submit someone else's object reference.
-    const expectedPrefix = `${user.id}/`;
+    const expectedPrefix = `photos/${user.id}/`;
     if (!objectPath.startsWith(expectedPrefix)) {
       throw new ValidationError(`objectPath must live under ${expectedPrefix}`);
     }
@@ -59,7 +59,7 @@ Deno.serve(
 
     // 3. Confirm the object actually exists in the bucket before we move the
     //    account into 'pending' — otherwise an admin opens an empty review.
-    const folder = user.id;
+    const folder = `photos/${user.id}`;
     const fileName = objectPath.slice(expectedPrefix.length);
     const { data: listing, error: listErr } = await svc.storage
       .from(BUCKET)
