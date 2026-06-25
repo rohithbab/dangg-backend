@@ -31,7 +31,6 @@ import {
 } from '../_shared/errors.ts';
 import { logger } from '../_shared/logger.ts';
 import { handler, ok } from '../_shared/responses.ts';
-import { serviceClient } from '../_shared/supabase-client.ts';
 import { parseBody, z } from '../_shared/validation.ts';
 
 // -----------------------------------------------------------------------------
@@ -153,21 +152,31 @@ Deno.serve(
 // =============================================================================
 
 /**
- * For test phone numbers: overwrites the stored OTP hash in auth.users so
- * that entering TEST_OTP ("123456") always passes GoTrue's OTP verification.
- * Uses a SECURITY DEFINER RPC to bypass RLS on auth.users.
+ * For test phone numbers: overwrites the stored OTP hash so that entering
+ * TEST_OTP ("123456") always passes GoTrue's OTP verification.
+ *
+ * Calls PostgREST directly (http://rest:3000) instead of via Kong to avoid
+ * a circular routing deadlock — this hook is itself called through Kong, so
+ * a Kong → hook → Kong chain can deadlock under limited connection capacity.
  */
 async function pinTestOtp(userId: string): Promise<void> {
-  const svc = serviceClient();
-  const { error } = await svc.rpc('pin_test_otp', {
-    p_user_id: userId,
-    p_otp: TEST_OTP,
-  });
-  if (error) {
-    logger.error('pin_test_otp RPC failed — test user may need to use real OTP', {
-      userId,
-      error: error.message,
+  const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
+  try {
+    const res = await fetch('http://rest:3000/rpc/pin_test_otp', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${serviceKey}`,
+        'apikey': serviceKey,
+      },
+      body: JSON.stringify({ p_user_id: userId, p_otp: TEST_OTP }),
     });
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      logger.error('pin_test_otp RPC failed', { status: res.status, body: body.slice(0, 300) });
+    }
+  } catch (err) {
+    logger.error('pin_test_otp fetch error', { error: String(err) });
   }
 }
 
