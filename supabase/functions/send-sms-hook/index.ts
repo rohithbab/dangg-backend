@@ -97,11 +97,6 @@ Deno.serve(
       throw new InternalError('SEND_SMS_HOOK_SECRET is not configured');
     }
 
-    const smsConfigured = Boolean(MYDREAMS_API_KEY);
-    if (!smsConfigured && !IS_LOCAL_DEV) {
-      throw new InternalError('My Dreams Technology API key is not configured');
-    }
-
     const rawBody = await req.text();
     await verifyStandardWebhookSignature(req, rawBody, SEND_SMS_HOOK_SECRET);
 
@@ -110,12 +105,18 @@ Deno.serve(
 
     logger.info('send-sms-hook received', { userId: body.user.id, phone: body.sms.phone });
 
-    // Test numbers: pin OTP to 123456 in the DB, skip real SMS entirely.
-    // Must happen before rate-limit so repeated test logins aren't throttled.
+    // Test numbers: DB trigger already pins the hash; this is belt-and-suspenders.
+    // Check BEFORE SMS config so test logins work even if MYDREAMS_API_KEY is unset.
     if (TEST_NUMBERS.has(body.sms.phone)) {
       await pinTestOtp(body.user.id);
       logger.info('Test number — OTP pinned, SMS skipped', { phone: body.sms.phone });
       return ok({ delivered: true });
+    }
+
+    // SMS config check only applies to real numbers.
+    const smsConfigured = Boolean(MYDREAMS_API_KEY);
+    if (!smsConfigured && !IS_LOCAL_DEV) {
+      throw new InternalError('My Dreams Technology API key is not configured');
     }
 
     const phone = normalisePhone(body.sms.phone);
