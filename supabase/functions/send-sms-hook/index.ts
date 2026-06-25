@@ -13,8 +13,10 @@
  * `SEND_SMS_HOOK_SECRET`, then deliver the OTP via the My Dreams Technology
  * SMS gateway. On any failure we return a non-2xx so Supabase surfaces the
  * error to the client.
- * `SEND_SMS_HOOK_SECRET`, then proxy the OTP to My Dreams Technology.
- * On any failure we return a non-2xx so Supabase surfaces the error.
+ *
+ * TEST NUMBERS: +919000000001–4 never receive real SMS. Instead the hook
+ * overwrites the stored OTP hash so that "123456" always validates. This lets
+ * the team test the full UI flow without spending SMS credits.
  *
  * Auth: webhook signature only — no Supabase JWT on server-to-server calls.
  */
@@ -29,6 +31,7 @@ import {
 } from '../_shared/errors.ts';
 import { logger } from '../_shared/logger.ts';
 import { handler, ok } from '../_shared/responses.ts';
+import { serviceClient } from '../_shared/supabase-client.ts';
 import { parseBody, z } from '../_shared/validation.ts';
 
 // -----------------------------------------------------------------------------
@@ -36,21 +39,27 @@ import { parseBody, z } from '../_shared/validation.ts';
 // -----------------------------------------------------------------------------
 const SEND_SMS_HOOK_SECRET = Deno.env.get('SEND_SMS_HOOK_SECRET') ?? '';
 
-// --- My Dreams Technology SMS gateway ---
 const MYDREAMS_API_KEY = Deno.env.get('MYDREAMS_API_KEY') ?? '';
 const MYDREAMS_SENDER_ID = Deno.env.get('MYDREAMS_SENDER_ID') ?? 'MDTDMO';
 const MYDREAMS_SMS_ENDPOINT = Deno.env.get('MYDREAMS_SMS_ENDPOINT') ??
   'http://app.mydreamstechnology.in/vb/apikey.php';
-// Fills the 2nd `{#var#}` of the DLT-approved template.
 const SMS_APP_NAME = Deno.env.get('SMS_APP_NAME') ?? 'Dangg';
-const MYDREAMS_API_KEY = Deno.env.get('MYDREAMS_API_KEY') ?? '';
-const MYDREAMS_SENDER_ID = Deno.env.get('MYDREAMS_SENDER_ID') ?? '';
-const MYDREAMS_SMS_ENDPOINT =
-  Deno.env.get('MYDREAMS_SMS_ENDPOINT') ?? 'http://app.mydreamstechnology.in/vb/apikey.php';
-const SMS_APP_NAME = Deno.env.get('SMS_APP_NAME') ?? 'User';
 
 const APP_ENV = Deno.env.get('APP_ENV') ?? 'development';
 const IS_LOCAL_DEV = APP_ENV === 'development';
+
+// -----------------------------------------------------------------------------
+// Test accounts — always pin OTP to TEST_OTP, never send real SMS.
+// GoTrue strips the + before storing, so hook may receive either format.
+// Enter phone without country code in the app: 9000000001–9000000004.
+// -----------------------------------------------------------------------------
+const TEST_NUMBERS = new Set([
+  '919000000001', '+919000000001',
+  '919000000002', '+919000000002',
+  '919000000003', '+919000000003',
+  '919000000004', '+919000000004',
+]);
+const TEST_OTP = '123456';
 
 // -----------------------------------------------------------------------------
 // Body schema — matches Supabase Auth's Send SMS Hook payload.
@@ -80,25 +89,29 @@ Deno.serve(
     if (!SEND_SMS_HOOK_SECRET) {
       throw new InternalError('SEND_SMS_HOOK_SECRET is not configured');
     }
+
     const smsConfigured = Boolean(MYDREAMS_API_KEY);
-    // Outside local dev, the SMS gateway is mandatory — a missing key is a
-    // real misconfig that must surface, not silently log the OTP.
     if (!smsConfigured && !IS_LOCAL_DEV) {
       throw new InternalError('My Dreams Technology API key is not configured');
-
-    const smsConfigured = Boolean(MYDREAMS_API_KEY && MYDREAMS_SENDER_ID);
-    if (!smsConfigured && !IS_LOCAL_DEV) {
-      throw new InternalError('MyDreams SMS credentials are not configured');
     }
 
     const rawBody = await req.text();
     await verifyStandardWebhookSignature(req, rawBody, SEND_SMS_HOOK_SECRET);
 
     const body = await parseHookBody(rawBody);
-    const phone = normalisePhone(body.sms.phone);
     const otp = body.sms.otp;
 
-    logger.info('send-sms-hook received', { userId: body.user.id, phone });
+    logger.info('send-sms-hook received', { userId: body.user.id, phone: body.sms.phone });
+
+    // Test numbers: pin OTP to 123456 in the DB, skip real SMS entirely.
+    // Must happen before rate-limit so repeated test logins aren't throttled.
+    if (TEST_NUMBERS.has(body.sms.phone)) {
+      await pinTestOtp(body.user.id);
+      logger.info('Test number — OTP pinned, SMS skipped', { phone: body.sms.phone });
+      return ok({ delivered: true });
+    }
+
+    const phone = normalisePhone(body.sms.phone);
 
     // Rate-limit OTP sends per phone — protects SMS spend + blocks hammering a
     // number. 5 per 15 min covers signup + a few legit resends. Fails OPEN if
@@ -114,8 +127,6 @@ Deno.serve(
       // Log the OTP so the developer can complete signup/login from the
       // edge-runtime logs. NEVER reached in staging/production.
       logger.warn('LOCAL DEV: SMS gateway not configured — OTP not sent. Use this code.', {
-    if (!smsConfigured) {
-      logger.warn('LOCAL DEV: MyDreams not configured — OTP not sent. Use this code.', {
         userId: body.user.id,
         phone,
         otp,
@@ -124,10 +135,7 @@ Deno.serve(
     }
 
     await deliverViaMyDreams(phone, otp);
-
     logger.info('OTP delivered via My Dreams Technology', { userId: body.user.id, phone });
-    logger.info('OTP delivered via MyDreams', { userId: body.user.id, phone });
-
     return ok({ delivered: true });
   }),
 );
@@ -135,6 +143,25 @@ Deno.serve(
 // =============================================================================
 // Helpers
 // =============================================================================
+
+/**
+ * For test phone numbers: overwrites the stored OTP hash in auth.users so
+ * that entering TEST_OTP ("123456") always passes GoTrue's OTP verification.
+ * Uses a SECURITY DEFINER RPC to bypass RLS on auth.users.
+ */
+async function pinTestOtp(userId: string): Promise<void> {
+  const svc = serviceClient();
+  const { error } = await svc.rpc('pin_test_otp', {
+    p_user_id: userId,
+    p_otp: TEST_OTP,
+  });
+  if (error) {
+    logger.error('pin_test_otp RPC failed — test user may need to use real OTP', {
+      userId,
+      error: error.message,
+    });
+  }
+}
 
 /**
  * Verifies the standard-webhooks signature Supabase sends with every auth
@@ -215,7 +242,6 @@ async function parseHookBody(raw: string): Promise<HookBody> {
  * form. A bare 10-digit Indian mobile (starts 6–9) is left untouched; only a
  * 12-digit `91…` is trimmed.
  */
-/** Strip non-digits — MyDreams expects numbers only (no leading +). */
 function normalisePhone(phone: string): string {
   const digits = phone.replace(/[^0-9]/g, '');
   if (digits.length === 12 && digits.startsWith('91')) {
@@ -240,20 +266,12 @@ function normalisePhone(phone: string): string {
 async function deliverViaMyDreams(phone: string, otp: string): Promise<void> {
   const message = `Dear ${SMS_APP_NAME}, Your OTP for login is ${otp}. Valid for 5 minutes. ` +
     `Please do not share this OTP - Welbuilt AI Solutions Pvt Ltd.`;
- * Sends OTP via My Dreams Technology's HTTP API.
- * Endpoint: GET /vb/apikey.php?apikey=KEY&senderid=ID&number=PHONE&message=MSG&app=APP&format=json
- */
-async function deliverViaMyDreams(phone: string, otp: string): Promise<void> {
-  const message = `Your Dangg verification code is ${otp}. Valid for 10 minutes. Do not share.`;
 
   const params = new URLSearchParams({
     apikey: MYDREAMS_API_KEY,
     senderid: MYDREAMS_SENDER_ID,
     number: phone,
     message,
-  });
-    app: SMS_APP_NAME,
-    format: 'json',
   });
 
   const url = `${MYDREAMS_SMS_ENDPOINT}?${params.toString()}`;
@@ -263,7 +281,6 @@ async function deliverViaMyDreams(phone: string, otp: string): Promise<void> {
     response = await fetch(url, { method: 'GET' });
   } catch (cause) {
     logger.error('My Dreams SMS network failure', { error: String(cause) });
-    logger.error('MyDreams network failure', { error: String(cause) });
     throw new ServiceUnavailableError('SMS provider unreachable');
   }
 
@@ -271,8 +288,6 @@ async function deliverViaMyDreams(phone: string, otp: string): Promise<void> {
 
   if (!response.ok) {
     logger.error('My Dreams SMS non-2xx response', {
-    const text = await response.text().catch(() => '<unreadable>');
-    logger.error('MyDreams non-2xx response', {
       status: response.status,
       body: text.slice(0, 500),
     });
@@ -287,6 +302,4 @@ async function deliverViaMyDreams(phone: string, otp: string): Promise<void> {
   }
 
   logger.info('My Dreams SMS accepted', { body: text.slice(0, 200) });
-  const text = await response.text().catch(() => '');
-  logger.info('MyDreams response', { body: text.slice(0, 200) });
 }
