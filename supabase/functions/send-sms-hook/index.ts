@@ -155,28 +155,25 @@ Deno.serve(
  * For test phone numbers: overwrites the stored OTP hash so that entering
  * TEST_OTP ("123456") always passes GoTrue's OTP verification.
  *
- * Calls PostgREST directly (http://rest:3000) instead of via Kong to avoid
- * a circular routing deadlock — this hook is itself called through Kong, so
- * a Kong → hook → Kong chain can deadlock under limited connection capacity.
+ * Uses a direct PostgreSQL connection via SUPABASE_DB_URL (already injected
+ * into the container) to bypass all HTTP routing (Kong / PostgREST) and
+ * avoid any circular-call issues.
  */
 async function pinTestOtp(userId: string): Promise<void> {
-  const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
+  const dbUrl = Deno.env.get('SUPABASE_DB_URL') ?? '';
+  if (!dbUrl) {
+    logger.error('SUPABASE_DB_URL not set — cannot pin test OTP');
+    return;
+  }
+  const { Client } = await import('npm:pg');
+  const client = new Client({ connectionString: dbUrl });
   try {
-    const res = await fetch('http://rest:3000/rpc/pin_test_otp', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${serviceKey}`,
-        'apikey': serviceKey,
-      },
-      body: JSON.stringify({ p_user_id: userId, p_otp: TEST_OTP }),
-    });
-    if (!res.ok) {
-      const body = await res.text().catch(() => '');
-      logger.error('pin_test_otp RPC failed', { status: res.status, body: body.slice(0, 300) });
-    }
+    await client.connect();
+    await client.query('SELECT public.pin_test_otp($1::uuid, $2)', [userId, TEST_OTP]);
   } catch (err) {
-    logger.error('pin_test_otp fetch error', { error: String(err) });
+    logger.error('pin_test_otp DB call failed', { error: String(err) });
+  } finally {
+    await client.end().catch(() => {});
   }
 }
 
