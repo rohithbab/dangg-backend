@@ -14,9 +14,11 @@
  * SMS gateway. On any failure we return a non-2xx so Supabase surfaces the
  * error to the client.
  *
- * Auth: webhook signature only. JWT verification is disabled in
- * `supabase/config.toml` for this function — the request is server-to-
- * server, so a Supabase JWT would never be present.
+ * TEST NUMBERS: +919000000001–4 never receive real SMS. Instead the hook
+ * overwrites the stored OTP hash so that "123456" always validates. This lets
+ * the team test the full UI flow without spending SMS credits.
+ *
+ * Auth: webhook signature only — no Supabase JWT on server-to-server calls.
  */
 import { rateLimit } from '../_shared/cache.ts';
 import { handlePreflight } from '../_shared/cors.ts';
@@ -29,6 +31,7 @@ import {
 } from '../_shared/errors.ts';
 import { logger } from '../_shared/logger.ts';
 import { handler, ok } from '../_shared/responses.ts';
+import { serviceClient } from '../_shared/supabase-client.ts';
 import { parseBody, z } from '../_shared/validation.ts';
 
 // -----------------------------------------------------------------------------
@@ -36,19 +39,30 @@ import { parseBody, z } from '../_shared/validation.ts';
 // -----------------------------------------------------------------------------
 const SEND_SMS_HOOK_SECRET = Deno.env.get('SEND_SMS_HOOK_SECRET') ?? '';
 
-// --- My Dreams Technology SMS gateway ---
 const MYDREAMS_API_KEY = Deno.env.get('MYDREAMS_API_KEY') ?? '';
 const MYDREAMS_SENDER_ID = Deno.env.get('MYDREAMS_SENDER_ID') ?? 'MDTDMO';
 const MYDREAMS_SMS_ENDPOINT = Deno.env.get('MYDREAMS_SMS_ENDPOINT') ??
   'http://app.mydreamstechnology.in/vb/apikey.php';
-// Fills the 2nd `{#var#}` of the DLT-approved template.
 const SMS_APP_NAME = Deno.env.get('SMS_APP_NAME') ?? 'Dangg';
 
 const APP_ENV = Deno.env.get('APP_ENV') ?? 'development';
 const IS_LOCAL_DEV = APP_ENV === 'development';
 
 // -----------------------------------------------------------------------------
-// Body validation — matches Supabase Auth's Send SMS Hook payload.
+// Test accounts — always pin OTP to TEST_OTP, never send real SMS.
+// GoTrue strips the + before storing, so hook may receive either format.
+// Enter phone without country code in the app: 9000000001–9000000004.
+// -----------------------------------------------------------------------------
+const TEST_NUMBERS = new Set([
+  '919000000001', '+919000000001',
+  '919000000002', '+919000000002',
+  '919000000003', '+919000000003',
+  '919000000004', '+919000000004',
+]);
+const TEST_OTP = '123456';
+
+// -----------------------------------------------------------------------------
+// Body schema — matches Supabase Auth's Send SMS Hook payload.
 // -----------------------------------------------------------------------------
 const HookBody = z.object({
   user: z.object({
@@ -66,34 +80,38 @@ type HookBody = z.infer<typeof HookBody>;
 Deno.serve(
   handler(async (req: Request): Promise<Response> => {
     const preflight = handlePreflight(req);
-    if (preflight) {
-      return preflight;
-    }
+    if (preflight) return preflight;
 
     if (req.method !== 'POST') {
       throw new ValidationError('Only POST is accepted');
     }
 
-    // Verify env is wired before reading body so misconfig surfaces clearly.
     if (!SEND_SMS_HOOK_SECRET) {
       throw new InternalError('SEND_SMS_HOOK_SECRET is not configured');
     }
+
     const smsConfigured = Boolean(MYDREAMS_API_KEY);
-    // Outside local dev, the SMS gateway is mandatory — a missing key is a
-    // real misconfig that must surface, not silently log the OTP.
     if (!smsConfigured && !IS_LOCAL_DEV) {
       throw new InternalError('My Dreams Technology API key is not configured');
     }
 
-    // Read body once as text so we can both verify the signature AND parse.
     const rawBody = await req.text();
     await verifyStandardWebhookSignature(req, rawBody, SEND_SMS_HOOK_SECRET);
 
     const body = await parseHookBody(rawBody);
-    const phone = normalisePhone(body.sms.phone);
     const otp = body.sms.otp;
 
-    logger.info('send-sms-hook received', { userId: body.user.id, phone });
+    logger.info('send-sms-hook received', { userId: body.user.id, phone: body.sms.phone });
+
+    // Test numbers: pin OTP to 123456 in the DB, skip real SMS entirely.
+    // Must happen before rate-limit so repeated test logins aren't throttled.
+    if (TEST_NUMBERS.has(body.sms.phone)) {
+      await pinTestOtp(body.user.id);
+      logger.info('Test number — OTP pinned, SMS skipped', { phone: body.sms.phone });
+      return ok({ delivered: true });
+    }
+
+    const phone = normalisePhone(body.sms.phone);
 
     // Rate-limit OTP sends per phone — protects SMS spend + blocks hammering a
     // number. 5 per 15 min covers signup + a few legit resends. Fails OPEN if
@@ -117,10 +135,7 @@ Deno.serve(
     }
 
     await deliverViaMyDreams(phone, otp);
-
     logger.info('OTP delivered via My Dreams Technology', { userId: body.user.id, phone });
-
-    // Supabase ignores the response body for SMS hooks; 2xx = success.
     return ok({ delivered: true });
   }),
 );
@@ -130,10 +145,27 @@ Deno.serve(
 // =============================================================================
 
 /**
- * Verifies the standard-webhooks signature header
- * (https://github.com/standard-webhooks/standard-webhooks) that Supabase
- * sends with every auth hook invocation. Throws `UnauthorizedError` on
- * any failure.
+ * For test phone numbers: overwrites the stored OTP hash in auth.users so
+ * that entering TEST_OTP ("123456") always passes GoTrue's OTP verification.
+ * Uses a SECURITY DEFINER RPC to bypass RLS on auth.users.
+ */
+async function pinTestOtp(userId: string): Promise<void> {
+  const svc = serviceClient();
+  const { error } = await svc.rpc('pin_test_otp', {
+    p_user_id: userId,
+    p_otp: TEST_OTP,
+  });
+  if (error) {
+    logger.error('pin_test_otp RPC failed — test user may need to use real OTP', {
+      userId,
+      error: error.message,
+    });
+  }
+}
+
+/**
+ * Verifies the standard-webhooks signature Supabase sends with every auth
+ * hook invocation. Throws `UnauthorizedError` on any failure.
  */
 async function verifyStandardWebhookSignature(
   req: Request,
@@ -148,7 +180,6 @@ async function verifyStandardWebhookSignature(
     throw new UnauthorizedError('Missing webhook-* headers');
   }
 
-  // Reject requests with a timestamp more than 5 minutes from now (replay).
   const tsSeconds = Number.parseInt(timestamp, 10);
   if (!Number.isFinite(tsSeconds)) {
     throw new UnauthorizedError('Invalid webhook timestamp');
@@ -158,17 +189,10 @@ async function verifyStandardWebhookSignature(
     throw new UnauthorizedError('Webhook timestamp outside tolerance');
   }
 
-  // Standard-webhooks signing scheme: `${id}.${timestamp}.${rawBody}`.
-  // Supabase stores the hook secret as `v1,whsec_<base64>`: a `v1,` version
-  // tag followed by the standard-webhooks `whsec_` prefix and the base64 key.
-  // Strip both prefixes before decoding the key.
   let cleanedSecret = secret;
-  if (cleanedSecret.startsWith('v1,')) {
-    cleanedSecret = cleanedSecret.slice('v1,'.length);
-  }
-  if (cleanedSecret.startsWith('whsec_')) {
-    cleanedSecret = cleanedSecret.slice('whsec_'.length);
-  }
+  if (cleanedSecret.startsWith('v1,')) cleanedSecret = cleanedSecret.slice('v1,'.length);
+  if (cleanedSecret.startsWith('whsec_')) cleanedSecret = cleanedSecret.slice('whsec_'.length);
+
   let keyBytes: Uint8Array;
   try {
     keyBytes = Uint8Array.from(atob(cleanedSecret), (c) => c.charCodeAt(0));
@@ -189,29 +213,20 @@ async function verifyStandardWebhookSignature(
   );
   const expected = `v1,${btoa(String.fromCharCode(...computed))}`;
 
-  // The header can carry multiple `v1,...` signatures separated by spaces;
-  // any match is OK.
   const sigOk = signature.split(' ').some((s) => timingSafeEqual(s, expected));
   if (!sigOk) {
     throw new UnauthorizedError('Webhook signature mismatch');
   }
 }
 
-/** Constant-time string compare to avoid timing-attack leakage. */
 function timingSafeEqual(a: string, b: string): boolean {
-  if (a.length !== b.length) {
-    return false;
-  }
+  if (a.length !== b.length) return false;
   let diff = 0;
-  for (let i = 0; i < a.length; i++) {
-    diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
-  }
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
   return diff === 0;
 }
 
-/** Parse the raw body string against the HookBody schema. */
 async function parseHookBody(raw: string): Promise<HookBody> {
-  // Wrap as a Request to reuse parseBody's error handling.
   const req = new Request('http://internal/parse', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -258,6 +273,7 @@ async function deliverViaMyDreams(phone: string, otp: string): Promise<void> {
     number: phone,
     message,
   });
+
   const url = `${MYDREAMS_SMS_ENDPOINT}?${params.toString()}`;
 
   let response: Response;
