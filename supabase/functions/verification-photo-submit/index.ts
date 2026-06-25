@@ -1,19 +1,18 @@
 /**
  * POST /functions/v1/verification-photo-submit
  *
- * Called after a female uploads her verification selfie directly to the
- * private `verification` Storage bucket (under her own
- * `photos/{auth.uid()}/…` folder, enforced by storage RLS). This endpoint:
- *   1. Validates the object path lives under the caller's own folder.
- *   2. Confirms the object actually exists in the bucket.
- *   3. Flips `females.verification_status` to 'pending' and stamps
- *      `verification_submitted_at`. Admins poll the pending queue to review.
+ * Called after a female uploads her verification selfie directly to R2
+ * (via a presigned PUT from `media-sign`, category=verification). This endpoint:
+ *   1. Validates the R2 object key lives under the caller's own folder.
+ *   2. Flips `females.verification_status` to 'pending', stamps
+ *      `verification_submitted_at`, and stores the R2 key in
+ *      `verification_photo_path`. Admins use the key to fetch a presigned GET.
  *
  * Re-submission is allowed only from 'none' or 'rejected'. A female who is
  * already 'pending' (awaiting review) or 'verified' is rejected with 409.
  *
  * Auth:    JWT (female)
- * Body:    { objectPath: string }   e.g. "photos/<uid>/selfie.jpg"
+ * Body:    { objectPath: string }   e.g. "verification/photos/<uid>/<uuid>.jpg"
  * Returns: { verificationStatus: 'pending', submittedAt }
  */
 import { requireAuth, requireRole } from '../_shared/auth.ts';
@@ -24,10 +23,8 @@ import { handler, ok } from '../_shared/responses.ts';
 import { serviceClient } from '../_shared/supabase-client.ts';
 import { parseBody, z } from '../_shared/validation.ts';
 
-const BUCKET = 'verification';
-
 const Body = z.object({
-  /** Storage object path the client uploaded to, e.g. "photos/<uid>/selfie.jpg". */
+  /** R2 object key returned by media-sign, e.g. "verification/photos/<uid>/<uuid>.jpg". */
   objectPath: z.string().min(3).max(300),
 });
 
@@ -47,37 +44,16 @@ Deno.serve(
 
     const { objectPath } = await parseBody(req, Body);
 
-    // 2. The path must live under the caller's own folder. Storage RLS
-    //    already enforces this on upload, but re-validate here so a client
-    //    can't submit someone else's object reference.
-    const expectedPrefix = `photos/${user.id}/`;
+    // 2. The R2 key must live under the caller's own folder.
+    //    media-sign produces: verification/photos/{uid}/{uuid}.ext
+    const expectedPrefix = `verification/photos/${user.id}/`;
     if (!objectPath.startsWith(expectedPrefix)) {
-      throw new ValidationError(`objectPath must live under ${expectedPrefix}`);
+      throw new ValidationError(`objectPath must start with ${expectedPrefix}`);
     }
 
     const svc = serviceClient();
 
-    // 3. Confirm the object actually exists in the bucket before we move the
-    //    account into 'pending' — otherwise an admin opens an empty review.
-    const folder = `photos/${user.id}`;
-    const fileName = objectPath.slice(expectedPrefix.length);
-    const { data: listing, error: listErr } = await svc.storage
-      .from(BUCKET)
-      .list(folder, { search: fileName });
-
-    if (listErr) {
-      logger.error('verification-photo-submit: storage list failed', {
-        userId: user.id,
-        error: listErr.message,
-      });
-      throw new InternalError('Could not verify the uploaded photo');
-    }
-    const exists = (listing ?? []).some((o) => o.name === fileName);
-    if (!exists) {
-      throw new NotFoundError('Uploaded photo not found. Please upload again.');
-    }
-
-    // 4. Read current status. Only 'none' / 'rejected' may (re)submit.
+    // 3. Read current status. Only 'none' / 'rejected' may (re)submit.
     const { data: female, error: femaleErr } = await svc
       .from('females')
       .select('verification_status')
@@ -102,9 +78,8 @@ Deno.serve(
       throw new ConflictError('Your account is already verified.');
     }
 
-    // 5. Transition to pending. Clear any prior rejection reason so a
-    //    re-submit starts clean. Guard on the prior status so a concurrent
-    //    submit can't double-apply.
+    // 4. Transition to pending. Store the R2 key so admins can retrieve the
+    //    photo. Guard on the prior status so a concurrent submit can't double-apply.
     const submittedAt = new Date().toISOString();
     const { data: updated, error: updateErr } = await svc
       .from('females')
@@ -112,6 +87,7 @@ Deno.serve(
         verification_status: 'pending',
         verification_submitted_at: submittedAt,
         verification_rejection_reason: null,
+        verification_photo_path: objectPath,
       })
       .eq('id', user.id)
       .in('verification_status', ['none', 'rejected'])
