@@ -14,7 +14,7 @@
  * SMS gateway. On any failure we return a non-2xx so Supabase surfaces the
  * error to the client.
  *
- * TEST NUMBERS: +919000000001–4 never receive real SMS. Instead the hook
+ * TEST NUMBERS: +919000000001–12 never receive real SMS. Instead the hook
  * overwrites the stored OTP hash so that "123456" always validates. This lets
  * the team test the full UI flow without spending SMS credits.
  *
@@ -51,13 +51,21 @@ const IS_LOCAL_DEV = APP_ENV === 'development';
 // -----------------------------------------------------------------------------
 // Test accounts — always pin OTP to TEST_OTP, never send real SMS.
 // GoTrue strips the + before storing, so hook may receive either format.
-// Enter phone without country code in the app: 9000000001–9000000004.
+// Enter phone without country code in the app: 9000000001–9000000012.
 // -----------------------------------------------------------------------------
 const TEST_NUMBERS = new Set([
   '919000000001', '+919000000001',
   '919000000002', '+919000000002',
   '919000000003', '+919000000003',
   '919000000004', '+919000000004',
+  '919000000005', '+919000000005',
+  '919000000006', '+919000000006',
+  '919000000007', '+919000000007',
+  '919000000008', '+919000000008',
+  '919000000009', '+919000000009',
+  '919000000010', '+919000000010',
+  '919000000011', '+919000000011',
+  '919000000012', '+919000000012',
 ]);
 const TEST_OTP = '123456';
 
