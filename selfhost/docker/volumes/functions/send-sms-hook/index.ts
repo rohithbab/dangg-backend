@@ -155,25 +155,30 @@ Deno.serve(
  * For test phone numbers: overwrites the stored OTP hash so that entering
  * TEST_OTP ("123456") always passes GoTrue's OTP verification.
  *
- * Uses a direct PostgreSQL connection via SUPABASE_DB_URL (already injected
- * into the container) to bypass all HTTP routing (Kong / PostgREST) and
- * avoid any circular-call issues.
+ * Calls pg-meta directly at http://meta:8080/query (internal Docker network).
+ * pg-meta requires no HTTP auth for internal requests — auth is handled by
+ * Kong for external access only. This avoids Kong/PostgREST circular routing.
  */
 async function pinTestOtp(userId: string): Promise<void> {
-  const dbUrl = Deno.env.get('SUPABASE_DB_URL') ?? '';
-  if (!dbUrl) {
-    logger.error('SUPABASE_DB_URL not set — cannot pin test OTP');
+  // Validate UUID to prevent SQL injection before string interpolation.
+  if (!/^[0-9a-f-]{36}$/i.test(userId)) {
+    logger.error('pin_test_otp: invalid userId format', { userId });
     return;
   }
-  const { Client } = await import('npm:pg');
-  const client = new Client({ connectionString: dbUrl });
   try {
-    await client.connect();
-    await client.query('SELECT public.pin_test_otp($1::uuid, $2)', [userId, TEST_OTP]);
+    const res = await fetch('http://meta:8080/query', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        query: `SELECT public.pin_test_otp('${userId}'::uuid, '${TEST_OTP}')`,
+      }),
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      logger.error('pin_test_otp pg-meta failed', { status: res.status, body: body.slice(0, 300) });
+    }
   } catch (err) {
-    logger.error('pin_test_otp DB call failed', { error: String(err) });
-  } finally {
-    await client.end().catch(() => {});
+    logger.error('pin_test_otp fetch error', { error: String(err) });
   }
 }
 
