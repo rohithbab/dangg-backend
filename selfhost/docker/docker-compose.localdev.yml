@@ -1,0 +1,19 @@
+# Local-dev ONLY overlay — never used by Dokploy/prod (prod deploys just the
+# base docker-compose.yml). Loosens GoTrue's ~60s OTP expiry and SMS resend
+# cooldown so manual test-number logins (OTP 123456) don't fight the defaults:
+# the pinned OTP stays valid long enough for a human to type, and re-sends are
+# allowed almost immediately.
+#
+# Apply (recreates only the auth container):
+#   docker compose -p supabase -f docker-compose.yml -f docker-compose.localdev.yml up -d --no-deps auth
+services:
+  auth:
+    environment:
+      GOTRUE_SMS_OTP_EXP: "86400"      # 24h — pinned test OTP won't expire mid-test
+      GOTRUE_SMS_MAX_FREQUENCY: "1s"   # allow near-immediate re-sends locally
+  functions:
+    environment:
+      # Duration billing: 1 earning-coin = 1s, nets ₹0.04. Payout math:
+      # COIN_VALUE_PAISA(10) × (1 - commission 60%) = ₹0.04 — matches
+      # female_inr_per_coin() so display and payout agree.
+      COIN_VALUE_PAISA: "10"
