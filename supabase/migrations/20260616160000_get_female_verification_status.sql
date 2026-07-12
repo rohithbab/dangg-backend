@@ -20,14 +20,16 @@ DECLARE
   v_avatar text;
   v_clean_phone text;
 BEGIN
-  -- Normalize phone: strip leading '+' if present
-  v_clean_phone := regexp_replace(p_phone, '^\+', '');
+  -- Normalize phone to digits only. public.users.phone may be stored with or
+  -- without a leading '+', so compare digit-strings on both sides to match
+  -- regardless of format.
+  v_clean_phone := regexp_replace(p_phone, '\D', '', 'g');
 
-  SELECT f.verification_status::text, u.name, u.profile_picture_url 
+  SELECT f.verification_status::text, u.name, u.profile_picture_url
   INTO v_status, v_name, v_avatar
   FROM public.females f
   JOIN public.users u ON u.id = f.id
-  WHERE u.phone = v_clean_phone;
+  WHERE regexp_replace(u.phone, '\D', '', 'g') = v_clean_phone;
 
   RETURN jsonb_build_object(
     'verification_status', coalesce(v_status, 'none'),
