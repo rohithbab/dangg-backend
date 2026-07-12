@@ -69,60 +69,20 @@ Deno.serve(
       );
     }
 
-    // 1. Refund first, then flip status. If the flip loses the race,
-    //    reverse the refund.
-    const { data: refundRows, error: refundErr } = await svc.rpc('credit_coins', {
-      p_male_id: user.id,
-      p_amount: cr.chat_cost_coins,
-      p_type: 'chat_refund',
-      p_reference_id: cr.id,
-      p_description: 'Refund: chat request cancelled by male',
-    });
-
-    if (refundErr || !refundRows || (refundRows as unknown[]).length === 0) {
-      logger.error('chat-requests-cancel: refund failed', {
-        chatRequestId,
-        maleId: user.id,
-        error: refundErr?.message,
-      });
-      throw new InternalError('Failed to cancel. Please try again.');
-    }
-
-    const refund = (refundRows as Array<{
-      transaction_id: string;
-      previous_balance: number;
-      new_balance: number;
-    }>)[0];
-
+    // Duration-only billing: nothing was escrowed on send, so cancelling has
+    // no refund. Just flip the request to cancelled.
     const { data: updatedRows, error: updateErr } = await svc
       .from('chat_requests')
       .update({
         status: 'cancelled',
         responded_at: new Date().toISOString(),
         response_reason: 'Cancelled by male',
-        refund_transaction_id: refund.transaction_id,
       })
       .eq('id', cr.id)
       .eq('status', 'pending')
       .select('id');
 
     if (updateErr || !updatedRows || updatedRows.length === 0) {
-      // Reverse the refund — the male incorrectly got coins back.
-      const { error: reverseErr } = await svc.rpc('credit_coins', {
-        p_male_id: user.id,
-        p_amount: -cr.chat_cost_coins,
-        p_type: 'admin_adjustment',
-        p_reference_id: cr.id,
-        p_description: 'Reversed: cancel lost race against another transition',
-      });
-      if (reverseErr) {
-        logger.error('chat-requests-cancel: refund reversal FAILED — extra coins on male', {
-          chatRequestId,
-          maleId: user.id,
-          refundTxnId: refund.transaction_id,
-          error: reverseErr.message,
-        });
-      }
       if (updateErr) {
         logger.error('chat-requests-cancel: state update failed', {
           chatRequestId,
@@ -138,7 +98,6 @@ Deno.serve(
     logger.info('Chat request cancelled', {
       chatRequestId,
       maleId: user.id,
-      refundCoins: cr.chat_cost_coins,
     });
 
     // Notify the female that the male pulled the request — best-effort.
@@ -157,8 +116,6 @@ Deno.serve(
 
     return ok({
       status: 'cancelled',
-      refundTransactionId: refund.transaction_id,
-      newCoinBalance: refund.new_balance,
     });
   }),
 );

@@ -95,37 +95,33 @@ Deno.serve(
     const respondedAt = new Date().toISOString();
 
     if (action === 'accept') {
-      // 4a. Credit female earnings BEFORE the status flip — if the flip
-      //     fails (optimistic-concurrency miss), we reverse the credit.
-      const { data: earningRows, error: earningErr } = await svc.rpc(
-        'credit_female_earnings',
-        {
-          p_female_id: user.id,
-          p_amount: cr.chat_cost_coins,
-          p_type: 'chat_earning',
-          p_reference_id: cr.id,
-          p_description: 'Accepted chat request',
-        },
-      );
-
-      if (earningErr || !earningRows || (earningRows as unknown[]).length === 0) {
-        logger.error('chat-requests-respond: earnings credit failed', {
-          chatRequestId,
+      // 4·0. Busy guard — one active chat per female. If she already has a live
+      //      session, refuse this accept so she is never double-booked. The
+      //      partial unique index chat_sessions_one_active_per_female is the
+      //      race-proof backstop; this returns a friendly message first.
+      const { data: liveSession, error: liveErr } = await svc
+        .from('chat_sessions')
+        .select('id')
+        .eq('female_id', user.id)
+        .eq('status', 'active')
+        .limit(1)
+        .maybeSingle();
+      if (liveErr) {
+        logger.error('chat-requests-respond: active-session lookup failed', {
           femaleId: user.id,
-          error: earningErr?.message,
+          error: liveErr.message,
         });
-        throw new InternalError('Failed to accept chat request. Please try again.');
+        throw new InternalError('Could not check availability');
+      }
+      if (liveSession) {
+        throw new ConflictError(
+          'You are already in an active chat. End it before accepting another.',
+        );
       }
 
-      const earning = (earningRows as Array<{
-        earning_id: string;
-        previous_balance_coins: number;
-        new_balance_coins: number;
-      }>)[0];
-
-      // 4b. Create the live chat session before flipping the request. If the
-      //     status flip loses the race, this session is deleted below along
-      //     with the earnings reversal.
+      // Duration-only billing: NOTHING is credited or charged at accept time.
+      // The male is charged and the female credited at chat END by actual
+      // duration (chat-sessions-end). Here we just open the live session.
       const { data: sessionRow, error: sessionErr } = await svc
         .from('chat_sessions')
         .insert({
@@ -139,21 +135,6 @@ Deno.serve(
         .single();
 
       if (sessionErr || !sessionRow) {
-        const { error: reverseErr } = await svc.rpc('credit_female_earnings', {
-          p_female_id: user.id,
-          p_amount: -cr.chat_cost_coins,
-          p_type: 'chat_earning_reversed',
-          p_reference_id: cr.id,
-          p_description: 'Reversed: chat session creation failed',
-        });
-        if (reverseErr) {
-          logger.error('chat-requests-respond: session-create reversal FAILED', {
-            chatRequestId,
-            femaleId: user.id,
-            earningId: earning.earning_id,
-            error: reverseErr.message,
-          });
-        }
         logger.error('chat-requests-respond: session create failed', {
           chatRequestId,
           femaleId: user.id,
@@ -165,16 +146,14 @@ Deno.serve(
 
       const chatSessionId = sessionRow.id as string;
 
-      // 4c. Atomic state flip — eq.status='pending' guards against concurrent
-      //     decline / cancel / expire. .select() returns the updated row, or
-      //     empty if no row matched.
+      // Atomic state flip — eq.status='pending' guards against concurrent
+      // decline / cancel / expire. If it loses the race, drop the session.
       const { data: updatedRows, error: updateErr } = await svc
         .from('chat_requests')
         .update({
           status: 'accepted',
           responded_at: respondedAt,
           response_reason: 'Accepted by female',
-          earning_id: earning.earning_id,
         })
         .eq('id', cr.id)
         .eq('status', 'pending')
@@ -182,23 +161,6 @@ Deno.serve(
 
       if (updateErr || !updatedRows || updatedRows.length === 0) {
         await svc.from('chat_sessions').delete().eq('id', chatSessionId);
-
-        // Reverse the earnings credit — the row transitioned without us.
-        const { error: reverseErr } = await svc.rpc('credit_female_earnings', {
-          p_female_id: user.id,
-          p_amount: -cr.chat_cost_coins,
-          p_type: 'chat_earning_reversed',
-          p_reference_id: cr.id,
-          p_description: 'Reversed: status update lost race against another transition',
-        });
-        if (reverseErr) {
-          logger.error('chat-requests-respond: reversal FAILED — orphaned earnings', {
-            chatRequestId,
-            femaleId: user.id,
-            earningId: earning.earning_id,
-            error: reverseErr.message,
-          });
-        }
         if (updateErr) {
           logger.error('chat-requests-respond: accept update failed', {
             chatRequestId,
@@ -216,7 +178,6 @@ Deno.serve(
         chatSessionId,
         femaleId: user.id,
         maleId: cr.male_id,
-        earningCoins: cr.chat_cost_coins,
       });
 
       // Notify the male — best-effort.
@@ -237,64 +198,23 @@ Deno.serve(
       return ok({
         status: 'accepted',
         chatSessionId,
-        earningId: earning.earning_id,
-        newEarningsBalanceCoins: earning.new_balance_coins,
       });
     }
 
-    // action === 'decline' — refund the male.
-    const { data: refundRows, error: refundErr } = await svc.rpc('credit_coins', {
-      p_male_id: cr.male_id,
-      p_amount: cr.chat_cost_coins,
-      p_type: 'chat_refund',
-      p_reference_id: cr.id,
-      p_description: 'Refund: chat request declined',
-    });
-
-    if (refundErr || !refundRows || (refundRows as unknown[]).length === 0) {
-      logger.error('chat-requests-respond: refund failed', {
-        chatRequestId,
-        maleId: cr.male_id,
-        error: refundErr?.message,
-      });
-      throw new InternalError('Failed to decline cleanly. Please try again.');
-    }
-
-    const refund = (refundRows as Array<{
-      transaction_id: string;
-      previous_balance: number;
-      new_balance: number;
-    }>)[0];
-
+    // action === 'decline' — duration-only billing means nothing was escrowed,
+    // so there is no refund. Just flip the request to declined.
     const { data: updatedRows, error: updateErr } = await svc
       .from('chat_requests')
       .update({
         status: 'declined',
         responded_at: respondedAt,
         response_reason: 'Declined by female',
-        refund_transaction_id: refund.transaction_id,
       })
       .eq('id', cr.id)
       .eq('status', 'pending')
       .select('id');
 
     if (updateErr || !updatedRows || updatedRows.length === 0) {
-      // Reverse the refund — the male incorrectly got coins back.
-      const { error: reverseErr } = await svc.rpc('credit_coins', {
-        p_male_id: cr.male_id,
-        p_amount: -cr.chat_cost_coins,
-        p_type: 'admin_adjustment',
-        p_reference_id: cr.id,
-        p_description: 'Reversed: decline lost race against another transition',
-      });
-      if (reverseErr) {
-        logger.error('chat-requests-respond: refund reversal FAILED — extra coins on male', {
-          chatRequestId,
-          maleId: cr.male_id,
-          refundTxnId: refund.transaction_id,
-          error: reverseErr.message,
-        });
-      }
       if (updateErr) {
         logger.error('chat-requests-respond: decline update failed', {
           chatRequestId,
@@ -311,7 +231,6 @@ Deno.serve(
       chatRequestId,
       femaleId: user.id,
       maleId: cr.male_id,
-      refundCoins: cr.chat_cost_coins,
     });
 
     // Notify the male — best-effort.
@@ -320,18 +239,16 @@ Deno.serve(
       recipientId: cr.male_id,
       type: 'chat_request_declined',
       title: 'Chat request declined',
-      body: `${declineName} declined your chat request. Coins refunded.`,
+      body: `${declineName} declined your chat request`,
       data: {
         chat_request_id: cr.id,
         from_user_id: user.id,
         from_user_name: declineName,
-        refund_coins: cr.chat_cost_coins,
       },
     });
 
     return ok({
       status: 'declined',
-      refundTransactionId: refund.transaction_id,
     });
   }),
 );

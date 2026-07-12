@@ -115,6 +115,29 @@ Deno.serve(
     if (!femaleRow.is_online) {
       throw new ConflictError('Female user is offline. Try someone who is online.');
     }
+
+    // 3c. Busy check — a female may hold only ONE active chat at a time. If she
+    //     is already in a live session she cannot receive new requests. Derived
+    //     from chat_sessions, so it clears automatically when that chat ends.
+    //     Checked BEFORE any coin charge so a busy target never costs the male.
+    const { data: activeSession, error: activeErr } = await svc
+      .from('chat_sessions')
+      .select('id')
+      .eq('female_id', femaleId)
+      .eq('status', 'active')
+      .limit(1)
+      .maybeSingle();
+    if (activeErr) {
+      logger.error('chat-requests-send: active-session lookup failed', {
+        femaleId,
+        error: activeErr.message,
+      });
+      throw new InternalError('Could not check availability');
+    }
+    if (activeSession) {
+      throw new ConflictError('She is busy in another chat right now. Please try again in a little while.');
+    }
+
     const chatCost = femaleRow.coin_price;
     if (!Number.isInteger(chatCost) || chatCost <= 0) {
       logger.error('chat-requests-send: invalid coin_price', { femaleId, chatCost });
@@ -256,58 +279,12 @@ Deno.serve(
 
     const chatRequestId = inserted.id as string;
 
-    // 7. Debit coins (escrow) via the canonical mutator.
-    const { data: chargeRows, error: chargeErr } = await svc.rpc('credit_coins', {
-      p_male_id: user.id,
-      p_amount: -chatCost,
-      p_type: 'chat_charge',
-      p_reference_id: chatRequestId,
-      p_description: 'Chat request escrow',
-    });
+    // Duration-only billing: NO upfront escrow / charge on send. The male is
+    // charged at chat END by actual duration (ceil(seconds / 3) coins) in
+    // chat-sessions-end, and there is NO refund. The balance pre-check above
+    // (needs >= the female's coin_price) is the "minimum balance to start".
 
-    if (chargeErr || !chargeRows || (chargeRows as unknown[]).length === 0) {
-      // Roll back the row reservation so the male's "one pending" slot frees.
-      await svc.from('chat_requests').delete().eq('id', chatRequestId);
-
-      const msg = chargeErr?.message ?? '';
-      if (msg.includes('Insufficient coin balance')) {
-        // Race: balance dropped between pre-check and lock acquisition
-        // (e.g. another concurrent send / cancel reversal).
-        throw new PaymentRequiredError(
-          'Insufficient coins. Top up your wallet to continue.',
-        );
-      }
-      logger.error('chat-requests-send: charge failed', {
-        chatRequestId,
-        maleId: user.id,
-        error: msg,
-      });
-      throw new InternalError('Failed to charge coins. Please try again.');
-    }
-
-    const charge = (chargeRows as Array<{
-      transaction_id: string;
-      previous_balance: number;
-      new_balance: number;
-    }>)[0];
-
-    // 8. Backfill charge_transaction_id on the row.
-    const { error: patchErr } = await svc
-      .from('chat_requests')
-      .update({ charge_transaction_id: charge.transaction_id })
-      .eq('id', chatRequestId);
-
-    if (patchErr) {
-      // The charge already happened and the request is live. Log and move on —
-      // the row is functional even without the back-reference; we surface the
-      // ledger id in the response so the client has it for receipts.
-      logger.warn('chat-requests-send: failed to backfill charge_transaction_id', {
-        chatRequestId,
-        error: patchErr.message,
-      });
-    }
-
-    // 9. Notify the female (best-effort — notify() never throws).
+    // 7. Notify the female (best-effort — notify() never throws).
     const senderName = await getUserDisplayName(svc, user.id);
     await notify(svc, {
       recipientId: femaleId,
@@ -334,9 +311,9 @@ Deno.serve(
     return ok({
       chatRequestId,
       expiresAt: expiresAt.toISOString(),
-      coinsCharged: chatCost,
-      newCoinBalance: charge.new_balance,
-      chargeTransactionId: charge.transaction_id,
+      coinsCharged: 0,
+      newCoinBalance: maleRow.coin_balance,
+      chargeTransactionId: null,
     });
   }),
 );
