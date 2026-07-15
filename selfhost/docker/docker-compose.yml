@@ -473,10 +473,15 @@ services:
 
   functions:
     container_name: supabase-edge-functions
-    image: supabase/edge-runtime:v1.74.0
+    # Functions are BAKED INTO the image (see edge-functions.Dockerfile) instead
+    # of bind-mounting ./volumes/functions, which kept getting recreated empty on
+    # Dokploy and took the whole edge layer down. Local dev re-adds the bind
+    # mount via docker-compose.localdev.yml for hot-editing.
+    build:
+      context: .
+      dockerfile: edge-functions.Dockerfile
     restart: unless-stopped
     volumes:
-      - ./volumes/functions:/home/deno/functions:z
       - deno-cache:/root/.cache/deno
     depends_on:
       kong:

@@ -17,3 +17,7 @@ services:
       # COIN_VALUE_PAISA(10) × (1 - commission 60%) = ₹0.04 — matches
       # female_inr_per_coin() so display and payout agree.
       COIN_VALUE_PAISA: "10"
+    # Local dev: hot-edit functions by mounting them over the baked image copy.
+    volumes:
+      - ./volumes/functions:/home/deno/functions:z
+      - deno-cache:/root/.cache/deno
