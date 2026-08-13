@@ -1,5 +1,5 @@
 -- =============================================================================
--- Migration: loosen online-presence freshness 12s -> 30s (stop false drops)
+-- Migration: loosen online-presence freshness 12s -> 20s (stop false drops)
 --
 -- 12s (with the 4s heartbeat) was aggressive enough that a genuinely-online
 -- female with a brief heartbeat gap dropped off browse — she stayed "online" on
@@ -20,7 +20,7 @@ SELECT
     AND GREATEST(
           COALESCE(f.last_heartbeat_at, 'epoch'::timestamptz),
           COALESCE(f.last_online_at,    'epoch'::timestamptz)
-        ) > NOW() - INTERVAL '30 seconds'
+        ) > NOW() - INTERVAL '20 seconds'
   )                                 AS is_online,
   f.last_online_at,
   f.coin_price,
@@ -53,7 +53,7 @@ BEGIN
       AND GREATEST(
             COALESCE(last_heartbeat_at, 'epoch'::timestamptz),
             COALESCE(last_online_at,    'epoch'::timestamptz)
-          ) < NOW() - INTERVAL '30 seconds'
+          ) < NOW() - INTERVAL '20 seconds'
     RETURNING id
   )
   SELECT count(*)::integer INTO v_count FROM stale;
