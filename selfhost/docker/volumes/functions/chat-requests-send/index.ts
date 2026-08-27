@@ -37,7 +37,7 @@ import { handler, ok } from '../_shared/responses.ts';
 import { serviceClient } from '../_shared/supabase-client.ts';
 import { parseBody, z } from '../_shared/validation.ts';
 
-const TIMEOUT_SECONDS = 120;
+const TIMEOUT_SECONDS = 30;
 
 const Body = z.object({
   femaleId: z.string().uuid(),
@@ -173,11 +173,26 @@ Deno.serve(
     // 4. Friendly pre-check — the partial unique index is the hard guard,
     //    but this lets us return a meaningful 409 instead of a Postgres
     //    constraint message.
+    // Only a still-LIVE pending request blocks a new one. A request past its
+    // expires_at but not yet swept by the 60s cron is effectively dead — it must
+    // not block a retry after the male already saw "No Response".
+    // Free the male's one-pending slot first: sweep any already-expired-but-
+    // unswept pending requests (the same idempotent job the 60s cron runs —
+    // refunds coins + notifies) so a retry right after "No Response" isn't
+    // blocked by the partial-unique index. Best-effort; the cron is the backstop.
+    const { error: sweepErr } = await svc.rpc('expire_pending_chat_requests');
+    if (sweepErr) {
+      logger.warn('chat-requests-send: on-demand expire sweep failed', {
+        error: sweepErr.message,
+      });
+    }
+
     const { data: existingPending, error: pendingErr } = await svc
       .from('chat_requests')
       .select('id, expires_at')
       .eq('male_id', user.id)
       .eq('status', 'pending')
+      .gt('expires_at', new Date().toISOString())
       .maybeSingle();
 
     if (pendingErr) {
