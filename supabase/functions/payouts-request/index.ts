@@ -3,7 +3,7 @@
  *
  * Female initiates a withdrawal. Steps:
  *   1. Auth — female only.
- *   2. Validate amount ≥ MIN_PAYOUT_COINS.
+ *   2. Validate net payout amount ≥ MIN_PAYOUT_PAISA (₹100).
  *   3. Confirm she has payout_details set.
  *   4. Friendly pre-check: no in-flight payout (partial unique index is the
  *      hard guarantee — concurrent racers get 409 from 23505).
@@ -15,7 +15,7 @@
  *  10. Notify the female (best-effort).
  *
  * Auth:    JWT (female)
- * Body:    { coinsToWithdraw: int >= MIN_PAYOUT_COINS }
+ * Body:    { coinsToWithdraw: int > 0 } — rejected if net rupee value < MIN_PAYOUT_PAISA
  * Returns: { payoutId, coinsRequested, payoutAmountPaisa, payoutAmountFormatted,
  *            expectedDays, escrowEarningId, requestedAt }
  */
@@ -52,12 +52,13 @@ Deno.serve(
     const user = await requireAuth(req);
     requireRole(user, 'female');
 
-    // 2. Input + amount floor.
+    // 2. Input + minimum rupee floor.
     const { coinsToWithdraw } = await parseBody(req, Body);
     const rates = getPayoutRates();
-    if (coinsToWithdraw < rates.minPayoutCoins) {
+    const previewPaisa = calculatePayoutPaisa(coinsToWithdraw, rates.coinValuePaisa, rates.commissionPct);
+    if (previewPaisa < rates.minPayoutPaisa) {
       throw new ValidationError(
-        `Minimum payout is ${rates.minPayoutCoins} coins. You requested ${coinsToWithdraw}.`,
+        `Minimum payout is ${formatPaisa(rates.minPayoutPaisa)}. Your ${coinsToWithdraw} coins are worth ${formatPaisa(previewPaisa)}.`,
       );
     }
 
@@ -129,11 +130,7 @@ Deno.serve(
     }
 
     // 6. Snapshot the rates + payout method.
-    const payoutAmountPaisa = calculatePayoutPaisa(
-      coinsToWithdraw,
-      rates.coinValuePaisa,
-      rates.commissionPct,
-    );
+    const payoutAmountPaisa = previewPaisa;
     if (payoutAmountPaisa <= 0) {
       // Should be unreachable given the min-coins floor and rate sanity
       // checks in parsePercent, but the CHECK constraint requires > 0.

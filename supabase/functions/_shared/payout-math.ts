@@ -14,13 +14,13 @@
 
 const COIN_VALUE_PAISA_DEFAULT = 22; // 1 coin = ₹0.22 (₹99 pack ÷ 450 coins)
 const PLATFORM_COMMISSION_PCT_DEFAULT = 60; // platform keeps 60%, female nets 40%
-const MIN_PAYOUT_COINS_DEFAULT = 100; // floor on a single payout request
+const MIN_PAYOUT_PAISA_DEFAULT = 10000; // ₹100 minimum net payout
 const PAYOUT_PROCESSING_DAYS_DEFAULT = 3; // display only
 
 export interface PayoutRates {
   coinValuePaisa: number;
   commissionPct: number;
-  minPayoutCoins: number;
+  minPayoutPaisa: number;
   processingDays: number;
 }
 
@@ -36,7 +36,7 @@ export function getPayoutRates(): PayoutRates {
       Deno.env.get('PLATFORM_COMMISSION_PCT'),
       PLATFORM_COMMISSION_PCT_DEFAULT,
     ),
-    minPayoutCoins: parsePositiveInt(Deno.env.get('MIN_PAYOUT_COINS'), MIN_PAYOUT_COINS_DEFAULT),
+    minPayoutPaisa: parsePositiveInt(Deno.env.get('MIN_PAYOUT_PAISA'), MIN_PAYOUT_PAISA_DEFAULT),
     processingDays: parsePositiveInt(
       Deno.env.get('PAYOUT_PROCESSING_DAYS'),
       PAYOUT_PROCESSING_DAYS_DEFAULT,
