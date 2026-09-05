@@ -524,6 +524,10 @@ services:
       FCM_PROJECT_ID: ${FCM_PROJECT_ID:-}
       FCM_SERVICE_ACCOUNT_JSON: ${FCM_SERVICE_ACCOUNT_JSON:-}
       REDIS_URL: redis://default:${REDIS_PASSWORD}@redis:6379
+      # Billing constants: 1 earning-coin = 1s of chat at base rate 30p/3s = 10p
+      # Female gets 40% → COIN_VALUE_PAISA(10) × (1 - 60%) = ₹0.04 per second
+      COIN_VALUE_PAISA: "10"
+      PLATFORM_COMMISSION_PCT: "60"
     command:
       [
         "start",
