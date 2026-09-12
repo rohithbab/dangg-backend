@@ -38,7 +38,8 @@ Deno.serve(
     const { token, platform } = await parseBody(req, Body);
 
     const now = new Date().toISOString();
-    const { error } = await serviceClient()
+    const svc = serviceClient();
+    const { error } = await svc
       .from('fcm_tokens')
       .upsert(
         { user_id: user.id, token, platform, updated_at: now, last_seen_at: now },
@@ -49,6 +50,26 @@ Deno.serve(
       // Non-fatal: the client retries on next launch / token refresh.
       logger.error('fcm-register: upsert failed', { userId: user.id, error: error.message });
       return ok({ registered: false });
+    }
+
+    // Single-device login means this account is active on exactly one device at
+    // a time, so it should receive pushes on exactly one device. Drop any OTHER
+    // token rows for this user (a device that was superseded by this login — the
+    // single-device "kick" — never explicitly logs out, so its token would
+    // otherwise linger and keep receiving this account's notifications). Deleted
+    // by user_id AND token != this one, so the just-registered device is kept.
+    // Also cleans up a stale token this same device replaced on a refresh.
+    const { error: pruneErr } = await svc
+      .from('fcm_tokens')
+      .delete()
+      .eq('user_id', user.id)
+      .neq('token', token);
+    if (pruneErr) {
+      // Non-fatal — the active token is registered; stale ones are cosmetic.
+      logger.warn('fcm-register: prune of stale tokens failed', {
+        userId: user.id,
+        error: pruneErr.message,
+      });
     }
 
     logger.info('fcm-register: token registered', { userId: user.id, platform });
